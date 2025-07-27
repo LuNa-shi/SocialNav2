@@ -36,6 +36,14 @@
 </div>
 
 
+# add data and pretrain files
+```
+ln -s /root/zengweijun/competition/Falcon/data data
+
+ln -s /root/zengweijun/competition/Falcon/pretrained_model pretrained_model
+```
+
+
 ## :sparkles: Overview
 
 To navigate safely and efficiently in crowded spaces, robots should not only perceive the current state of the environment but also anticipate future human movements.
