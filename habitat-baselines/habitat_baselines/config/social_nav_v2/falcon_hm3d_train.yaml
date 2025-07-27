@@ -104,7 +104,8 @@ habitat_baselines:
   # Force PyTorch to be single threaded as
   # this improves performance considerably
   force_torch_single_threaded: True
-  load_resume_state_config: False
+  load_resume_state_config: True
+  # train_ckpt: "evaluation/falcon/hm3d/checkpoints/latest.pth" # "evaluation/falcon/hm3d/checkpoints/ckpt.000020.pth"
 
   evaluator:
     _target_: habitat_baselines.rl.ppo.falcon_evaluator.FALCONEvaluator

@@ -600,12 +600,18 @@ class SPL(Measure):
 
         self._previous_position = current_position
 
-        self._metric = ep_success * (
-            self._start_end_episode_distance
-            / max(
-                self._start_end_episode_distance, self._agent_episode_distance
-            )
+        denominator = max(
+        self._start_end_episode_distance, self._agent_episode_distance
         )
+
+        if denominator > 0:
+            self._metric = ep_success * (
+                self._start_end_episode_distance / denominator
+            )
+        else:
+            # 如果分母为0，说明起点和终点重合，且智能体未移动。
+            # 这种情况下，如果任务成功，SPL 应该为 1。
+            self._metric = ep_success * 1.0
 
 
 @registry.register_measure
