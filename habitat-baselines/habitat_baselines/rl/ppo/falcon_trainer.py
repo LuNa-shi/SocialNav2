@@ -716,19 +716,19 @@ class FalconTrainer(BaseRLTrainer):
             self._agent.load_state_dict(resume_state)
 
             requeue_stats = resume_state["requeue_stats"]
-            self.num_steps_done = requeue_stats["num_steps_done"]
+            # self.num_steps_done = requeue_stats["num_steps_done"]
             self.num_updates_done = requeue_stats["num_updates_done"]
             self._last_checkpoint_percent = requeue_stats[
                 "_last_checkpoint_percent"
             ]
-            count_checkpoints = requeue_stats["count_checkpoints"]
-            prev_time = requeue_stats["prev_time"]
+            # count_checkpoints = requeue_stats["count_checkpoints"]
+            # prev_time = requeue_stats["prev_time"]
 
-            self.running_episode_stats = requeue_stats["running_episode_stats"]
-            self.window_episode_stats.update(
-                requeue_stats["window_episode_stats"]
-            )
-            resume_run_id = requeue_stats.get("run_id", None)
+            # self.running_episode_stats = requeue_stats["running_episode_stats"]
+            # self.window_episode_stats.update(
+            #     requeue_stats["window_episode_stats"]
+            # )
+            # resume_run_id = requeue_stats.get("run_id", None)
 
         with (
             get_writer(
