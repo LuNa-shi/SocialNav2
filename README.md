@@ -36,11 +36,19 @@
 </div>
 
 
-# add data and pretrain files
+## add data and pretrain files
 ```
 ln -s /root/zengweijun/competition/Falcon/data data
 
 ln -s /root/zengweijun/competition/Falcon/pretrained_model pretrained_model
+```
+
+## install packages for adapt3r
+```
+# DGL是必须的，用于最远点采样
+pip install dgl -f https://data.dgl.ai/wheels/cu121/repo.html # (请根据您的CUDA版本调整)
+# 如果使用CLIP backbone，需要安装clip
+pip install git+https://github.com/openai/CLIP.git
 ```
 
 
