@@ -17,6 +17,14 @@ from habitat_baselines.config.default_structured_configs import (
     HabitatBaselinesConfigPlugin,
 )
 
+
+try:
+    from habitat_baselines.rl.ddppo.policy import habitat_camera_sensors
+    print("<<<<< Successfully imported custom sensors >>>>>")
+except ImportError as e:
+    print(f"<<<<< Failed to import custom sensors: {e} >>>>>")
+
+    
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 

@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from omegaconf import DictConfig
 
 from habitat_baselines.rl.ddppo.policy import PointNavResNetNet
+from habitat_baselines.rl.ddppo.policy.adapt3r_policy import Adapt3RPolicy  # Import Adapt3R Policy
 from habitat_baselines.rl.ppo.agent_access_mgr import AgentAccessMgr
 from habitat_baselines.rl.ppo.evaluator import Evaluator
 from habitat_baselines.rl.ppo.single_agent_access_mgr import (  # noqa: F401.
@@ -276,7 +277,7 @@ class FalconTrainer(BaseRLTrainer):
 
         self._agent = self._create_agent(resume_state)
         if self._is_distributed:
-            self._agent.init_distributed(find_unused_params=False)  # type: ignore
+            self._agent.init_distributed(find_unused_params=True)  # type: ignore
         self._agent.post_init()
 
         self._is_static_encoder = (
@@ -717,10 +718,10 @@ class FalconTrainer(BaseRLTrainer):
 
             requeue_stats = resume_state["requeue_stats"]
             # self.num_steps_done = requeue_stats["num_steps_done"]
-            self.num_updates_done = requeue_stats["num_updates_done"]
-            self._last_checkpoint_percent = requeue_stats[
-                "_last_checkpoint_percent"
-            ]
+            # self.num_updates_done = requeue_stats["num_updates_done"]
+            # self._last_checkpoint_percent = requeue_stats[
+            #     "_last_checkpoint_percent"
+            # ]
             # count_checkpoints = requeue_stats["count_checkpoints"]
             # prev_time = requeue_stats["prev_time"]
 
@@ -911,8 +912,8 @@ class FalconTrainer(BaseRLTrainer):
                                         render_view.uuid
                                     )
 
-        if config.habitat_baselines.verbose:
-            logger.info(f"env config: {OmegaConf.to_yaml(config)}")
+        # if config.habitat_baselines.verbose:
+        #     logger.info(f"env config: {OmegaConf.to_yaml(config)}")
 
         self._init_envs(config, is_eval=True)
 

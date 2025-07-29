@@ -17,3 +17,14 @@ from .orca_policy import (  # noqa: F401.
 from .astar_policy import (  # noqa: F401.
     ASTARPolicy,
 )
+
+from .habitat_camera_sensors import (  # noqa: F401.
+    CameraIntrinsicsSensor,
+    CameraExtrinsicsSensor,
+)
+
+from . import habitat_camera_sensors
+
+# print('--------------------------------')
+# print("CameraIntrinsicsSensor", CameraIntrinsicsSensor)
+# print("CameraExtrinsicsSensor", CameraExtrinsicsSensor)

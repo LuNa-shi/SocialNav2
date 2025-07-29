@@ -108,33 +108,28 @@ class DecentralizedDistributedMixin:
         return distributed_var_mean(x)
 
     def init_distributed(self, find_unused_params: bool = True) -> None:
-        r"""Initializes distributed training for the model
+        """Initializes distributed training for the model
 
         1. Broadcasts the model weights from world_rank 0 to all other workers
         2. Adds gradient hooks to the model
 
         :param find_unused_params: Whether or not to filter out unused parameters
-                                   before gradient reduction.  This *must* be True if
-                                   there are any parameters in the model that where unused in the
-                                   forward pass, otherwise the gradient reduction
-                                   will not work correctly.
+            from gradient reduction
         """
-
-        # NB: Used to hide the hooks from the nn.Module,
-        # so they don't show up in the state_dict
-        class Guard:  # noqa: SIM119
+        # NB: Used to hide the hooks from the nn.Module
+        class Guard:
             def __init__(self, model, device):
-                if device.type == "cuda":
-                    self.ddp = torch.nn.parallel.DistributedDataParallel(  # type: ignore
+                if torch.cuda.is_available():
+                    self.ddp = torch.nn.parallel.DistributedDataParallel(
                         model,
                         device_ids=[device],
                         output_device=device,
-                        find_unused_parameters=find_unused_params,
+                        find_unused_parameters=find_unused_params,  # 启用未使用参数检测
                     )
                 else:
-                    self.ddp = torch.nn.parallel.DistributedDataParallel(  # type: ignore
+                    self.ddp = torch.nn.parallel.DistributedDataParallel(
                         model,
-                        find_unused_parameters=find_unused_params,
+                        find_unused_parameters=find_unused_params,  # 启用未使用参数检测
                     )
 
         self._evaluate_actions_wrapper = Guard(_EvalActionsWrapper(self.actor_critic), self.device)  # type: ignore

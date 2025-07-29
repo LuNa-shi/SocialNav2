@@ -31,22 +31,22 @@ habitat:
     agents:
       agent_0:
         sim_sensors:
-          # jaw_rgb_sensor:
-          #   type: HabitatSimRGBSensor
-          #   height: 256
-          #   width: 256
-          #   position:
-          #   - 0.0
-          #   - 1.25
-          #   - 0.0
-          #   orientation:
-          #   - 0.0
-          #   - 0.0
-          #   - 0.0
-          #   hfov: 90
-          #   sensor_subtype: PINHOLE
-          #   noise_model: None
-          #   noise_model_kwargs: {}
+          jaw_rgb_sensor:
+            type: HabitatSimRGBSensor
+            height: 256
+            width: 256
+            position:
+            - 0.0
+            - 1.25
+            - 0.0
+            orientation:
+            - 0.0
+            - 0.0
+            - 0.0
+            hfov: 90
+            sensor_subtype: PINHOLE
+            noise_model: None
+            noise_model_kwargs: {}
           jaw_depth_sensor:
             height: 256
             width: 256
@@ -65,6 +65,8 @@ habitat:
             min_depth: 0.0
             max_depth: 10.0
             normalize_depth: true
+
+
     kinematic_mode: True
     habitat_sim_v0:
       gpu_device_id: 0
