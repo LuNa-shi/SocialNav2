@@ -100,7 +100,7 @@ habitat_baselines:
   video_dir: "evaluation/falcon/hm3d/video"
   test_episode_count: -1
   num_environments: 8
-  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints" # save_dir for training
+  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_730" # save_dir for training
   num_updates: -1
   total_num_steps: 15000000 # exact steps 12560368
   log_interval: 10
@@ -109,7 +109,17 @@ habitat_baselines:
   # this improves performance considerably
   force_torch_single_threaded: True
   load_resume_state_config: False
-  # train_ckpt: "evaluation/falcon/hm3d/checkpoints/latest.pth" # "evaluation/falcon/hm3d/checkpoints/ckpt.000020.pth"
+  load_from_checkpoint: ""
+
+  il:
+    trainer_name: "adapt3r_il_trainer" # 指定使用我们为 IL 编写的训练器
+    
+    # --- IL 数据集和训练流程 ---
+    data_path: "path/to/your/expert_data_dir/" # !! 重要: 替换为你的专家数据路径
+    lr: 2.5e-4 # IL 的学习率可以和 RL 不同
+    batch_size: 8
+    epochs: 50
+    checkpoint_interval: 5 # 每 5 个 epoch 保存一次检查点
 
   evaluator:
     _target_: habitat_baselines.rl.ppo.falcon_evaluator.FALCONEvaluator
@@ -184,24 +194,21 @@ habitat_baselines:
       train_encoder: True
       # Whether to reset the critic linear layer
       reset_critic: True
-
-      # Model parameters (overridden by Adapt3R policy config)
-      backbone: resnet18  # Default, but Adapt3R uses its own backbone config
-      rnn_type: GRU       # Default, but Adapt3R uses its own RNN config  
-      num_recurrent_layers: 1
       
       # Adapt3R-specific configuration
       adapt3r:
         visual_encoder:
-          backbone_type: "resnet18"     # 使用 resnet18 更稳定，没有预训练模型
+          backbone_type: "clip"     # 使用 resnet18 更稳定，没有预训练模型
           hidden_dim: 126               # 必须能被6整除 (NeRF positional encoding)
           num_points: 256               # 点云采样数量
           do_image: True                # 使用视觉特征
           do_pos: True                  # 使用位置编码
           do_rgb: False                 # 不使用原始RGB
-          finetune: True                # 训练视觉编码器 (没有预训练模型)
+          finetune: False                # 训练视觉编码器 (没有预训练模型)
           xyz_proj_type: "nerf"         # NeRF 位置编码
           clip_model: "RN50"            # CLIP模型 (如果使用CLIP backbone)
+          rnn_type: GRU       # Default, but Adapt3R uses its own RNN config  
+          num_recurrent_layers: 1
           
           # 点云处理配置
           do_crop: True                 # 启用点云裁剪

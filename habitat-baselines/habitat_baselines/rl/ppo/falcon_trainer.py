@@ -389,10 +389,6 @@ class FalconTrainer(BaseRLTrainer):
                 for k, v in step_batch.items()
                 if k.startswith("index_len")
             }
-            # contains_inf_or_nan(step_batch["observations"])
-            # contains_inf_or_nan(step_batch["recurrent_hidden_states"])
-            # contains_inf_or_nan(step_batch["prev_actions"])
-            # contains_inf_or_nan(step_batch["masks"])
             action_data = self._agent.actor_critic.act(
                 step_batch["observations"],
                 step_batch["recurrent_hidden_states"],
@@ -717,13 +713,13 @@ class FalconTrainer(BaseRLTrainer):
             self._agent.load_state_dict(resume_state)
 
             requeue_stats = resume_state["requeue_stats"]
-            # self.num_steps_done = requeue_stats["num_steps_done"]
-            # self.num_updates_done = requeue_stats["num_updates_done"]
-            # self._last_checkpoint_percent = requeue_stats[
-            #     "_last_checkpoint_percent"
-            # ]
-            # count_checkpoints = requeue_stats["count_checkpoints"]
-            # prev_time = requeue_stats["prev_time"]
+            self.num_steps_done = requeue_stats["num_steps_done"]
+            self.num_updates_done = requeue_stats["num_updates_done"]
+            self._last_checkpoint_percent = requeue_stats[
+                "_last_checkpoint_percent"
+            ]
+            count_checkpoints = requeue_stats["count_checkpoints"]
+            prev_time = requeue_stats["prev_time"]
 
             # self.running_episode_stats = requeue_stats["running_episode_stats"]
             # self.window_episode_stats.update(

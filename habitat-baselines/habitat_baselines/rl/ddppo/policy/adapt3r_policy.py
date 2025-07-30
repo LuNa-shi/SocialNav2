@@ -20,6 +20,7 @@
 # 5. Habitat Policy: Adapt3RPolicy
 # ---------------------------------------------------------------------------- #
 
+import math
 import einops
 import torch
 import torch.nn as nn
@@ -311,12 +312,13 @@ def load_clip_features(model="RN50"):
     return clip_model.visual, normalize
 
 class PointCloudBaseEncoder(nn.Module):
-    def __init__(self, observation_space, num_points, lowdim_obs_keys, do_crop=True, boundaries=None):
+    def __init__(self, observation_space, num_points, lowdim_obs_keys, do_crop=True, boundaries=None, downsample_mode='pos'):
         super().__init__()
         self.observation_space = observation_space
         self.num_points = num_points
         self.lowdim_obs_keys = lowdim_obs_keys if lowdim_obs_keys else []
         self.do_crop = do_crop
+        self.downsample_mode = downsample_mode
 
         print(f"observation_space: {observation_space}")
         print(f"lowdim_obs_keys: {self.lowdim_obs_keys}")
@@ -351,12 +353,25 @@ class PointCloudBaseEncoder(nn.Module):
             else:
                 # Create default intrinsics based on depth image size
                 B, C, H, W = depth_tensor.shape
-                default_intrinsics = torch.eye(3, device=depth_tensor.device).unsqueeze(0).expand(B, -1, -1)
-                default_intrinsics[:, 0, 0] = W * 0.8  # fx
-                default_intrinsics[:, 1, 1] = H * 0.8  # fy  
-                default_intrinsics[:, 0, 2] = W / 2    # cx
-                default_intrinsics[:, 1, 2] = H / 2    # cy
-                intrinsics.append(default_intrinsics)
+                assert(H==256 and W==256)
+                hfov_deg = 90.0
+                # 2. 将角度从度转换为弧度
+                hfov_rad = math.radians(hfov_deg)
+
+                fx = (W / 2.0) / math.tan(hfov_rad / 2.0)
+                
+                # 4. 创建内参矩阵
+                # 创建一个单位矩阵作为模板
+                default_intrinsics = torch.eye(3, device=depth_tensor.device, dtype=torch.float32).unsqueeze(0).expand(B, -1, -1)
+                
+                # 填充计算出的值
+                # .clone() 是一个好习惯，可以避免对 expand 后的张量进行原地修改的警告
+                cloned_intrinsics = default_intrinsics.clone()
+                cloned_intrinsics[:, 0, 0] = fx     # fx (焦距x)
+                cloned_intrinsics[:, 1, 1] = fx     # fy (焦距y, 假设像素是正方形)
+                cloned_intrinsics[:, 0, 2] = W / 2.0  # cx (主点x, 图像中心)
+                cloned_intrinsics[:, 1, 2] = H / 2.0  # cy (主点y, 图像中心)
+                intrinsics.append(cloned_intrinsics)
             
             # Get extrinsics or use identity matrix
             ext_key = EnvUtils.camera_name_to_extrinsic_key(cam_name)
@@ -380,8 +395,27 @@ class PointCloudBaseEncoder(nn.Module):
         b, n, d = pcd.shape
         
         if dgl_geo is not None:
-            # Use DGL farthest point sampling if available
-            downsample_indices = dgl_geo.farthest_point_sampler(pcd, self.num_points)
+            if self.downsample_mode == "pos":
+                # 模式1: 基于坐标 (XYZ) 进行FPS
+                downsample_indices = dgl_geo.farthest_point_sampler(pcd, self.num_points)
+                
+            elif self.downsample_mode == "feat":
+                # 模式2: 基于特征进行FPS
+                # 注意：DGL的FPS要求输入是3D坐标，我们这里用特征的前N维模拟坐标
+                # 这是一个常见的做法。原版代码截取了前30维。
+                # TODO check the rgb_features.shape[-1]
+                print('='*50)
+                print(f"rgb_features.shape[-1]: {rgb_features.shape[-1]}")
+                if rgb_features.shape[-1] >= 3:
+                     # 使用特征的前3维作为代理几何信息进行采样
+                    downsample_indices = dgl_geo.farthest_point_sampler(rgb_features[..., :3], self.num_points)
+                else:
+                    # 如果特征维度小于3，则退回到基于位置的采样
+                    print("Warning: Feature dimension is less than 3, falling back to 'pos' downsample mode.")
+                    downsample_indices = dgl_geo.farthest_point_sampler(pcd, self.num_points)
+            else:
+                 raise ValueError(f"Unknown downsample_mode: {self.downsample_mode}")
+
             downsampled_pcd = torch.gather(pcd, 1, einops.repeat(downsample_indices, "b n -> b n d", d=d))
             downsampled_feats = torch.gather(rgb_features, 1, einops.repeat(downsample_indices, "b n -> b n d", d=rgb_features.shape[-1]))
         else:
@@ -514,6 +548,7 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         del fpn_features_dict
         torch.cuda.empty_cache()
 
+        # Get the 2d rgb features: 
         feat_h, feat_w = rgb_features.shape[-2:]
         
         # Simple subsampling instead of interpolation to avoid shape issues
@@ -594,7 +629,7 @@ class Adapt3RNet(Net):
         perception_feats, lowdim_feats = self.visual_encoder(observations)
         
         x = [perception_feats]
-        if lowdim_feats is not None: 
+        if lowdim_feats is not None and self.visual_encoder.d_out_lowdim > 0: 
             x.append(lowdim_feats)
             
         if isinstance(self.prev_action_embedding, nn.Embedding):
@@ -609,29 +644,19 @@ class Adapt3RNet(Net):
             prev_actions = self.prev_action_embedding(masks * prev_actions.float())
         x.append(prev_actions)
         
-        # 合并特征并清理中间变量
         cat_features = torch.cat(x, dim=1)
-        del x, perception_feats
-        if lowdim_feats is not None:
-            del lowdim_feats
-        torch.cuda.empty_cache()
         
-        # 将 rnn_build_seq_info 传递给 state_encoder
         out, rnn_hidden_states = self.state_encoder(
             cat_features, rnn_hidden_states, masks, rnn_build_seq_info
         )
         
-        # 清理最后的中间变量
-        del cat_features
-        torch.cuda.empty_cache()
+        # This dictionary passes intermediate tensors to the aux losses.
+        # Common keys are "perception_embed" and "rnn_output".
+        aux_loss_state = {
+            "rnn_output": out,                 # The final output of the RNN
+        }
 
-        # 确保所有参数都参与计算
-        dummy_loss = 0
-        for param in self.parameters():
-            if param.requires_grad:
-                dummy_loss = dummy_loss + param.mean() * 0
-        
-        return out + dummy_loss.detach(), rnn_hidden_states, {}
+        return out, rnn_hidden_states, aux_loss_state
 
 # ############################################################################ #
 # 5. Habitat Policy: Adapt3RPolicy
@@ -639,31 +664,49 @@ class Adapt3RNet(Net):
 
 @baseline_registry.register_policy
 class Adapt3RPolicy(NetPolicy):
-    def __init__(self, observation_space, action_space, policy_config, **kwargs):
+    """
+    Habitat-compatible policy for the Adapt3R model.
+    """
+    def __init__(self, observation_space, action_space, policy_config, aux_loss_config=None, **kwargs):
+        print(f"observation_space: {observation_space}")
+        print(f"action_space: {action_space}")
         super().__init__(
             net=Adapt3RNet(observation_space, action_space, policy_config),
             action_space=action_space,
             policy_config=policy_config,
+            aux_loss_config=aux_loss_config,
         )
         self.net.apply(weight_init)
 
     @classmethod
     def from_config(cls, config, observation_space, action_space, **kwargs):
         # Good practice: filter out rendering sensors from obs space
-        ignore_names = [s.uuid for s in config.habitat_baselines.eval.extra_sim_sensors.values()]
-        filtered_obs = spaces.Dict(OrderedDict([(k, v) for k, v in observation_space.items() if k not in ignore_names]))
+        filtered_obs = {
+            k: v for k, v in observation_space.spaces.items() 
+            if "render_cam" not in k and "panoramic" not in k
+        }
+        filtered_obs = spaces.Dict(filtered_obs)
+        
+        policy_config = config.habitat_baselines.rl.policy
         
         # Build policy configuration from config sections
         policy_config = OmegaConf.create({
             'name': 'Adapt3RPolicy',
             'action_distribution_type': config.habitat_baselines.rl.policy.agent_0.get('action_distribution_type', 'categorical'),
-            'hidden_size': config.habitat_baselines.rl.ppo.hidden_size,
-            'rnn_type': config.habitat_baselines.rl.ddppo.rnn_type,
-            'num_recurrent_layers': config.habitat_baselines.rl.ddppo.num_recurrent_layers,
+            'hidden_size': config.habitat_baselines.rl.ddppo.hidden_size,
+            'rnn_type': config.habitat_baselines.rl.ddppo.adapt3r.rnn_type,
+            'num_recurrent_layers': config.habitat_baselines.rl.ddppo.adapt3r.num_recurrent_layers,
             'visual_encoder': config.habitat_baselines.rl.ddppo.adapt3r.visual_encoder
         })
+
+        aux_loss_config = config.habitat_baselines.rl.auxiliary_losses
         
-        return cls(filtered_obs, action_space, policy_config)
+        return cls(
+            observation_space=filtered_obs, 
+            action_space=action_space, 
+            policy_config=policy_config,
+            aux_loss_config=aux_loss_config
+        )
 
 
 

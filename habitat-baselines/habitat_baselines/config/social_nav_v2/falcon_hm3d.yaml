@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - /benchmark/nav/socialnav_v2: falcon_hm3d_task
+  - /benchmark/nav/socialnav_v2: falcon_hm3d_task_for_train
   - /habitat_baselines: habitat_baselines_rl_config_base
   - /habitat/simulator/sim_sensors@habitat_baselines.eval.extra_sim_sensors.third_rgb_sensor: third_rgb_sensor 
   - /habitat_baselines/rl/policy@habitat_baselines.rl.policy.agent_1: single_fixed
@@ -24,14 +24,20 @@ defaults:
   - _self_
 
 habitat:
-  environment:
-    iterator_options:
-      shuffle: False # keep the same order
+  dataset:
+    split: val
   gym:
     obs_keys: 
-      # - agent_0_articulated_agent_jaw_rgb # use it if add RGB camera
-      - agent_0_articulated_agent_jaw_depth
+      # Adapt3R required sensors
+      - agent_0_articulated_agent_jaw_rgb         # RGB camera for Adapt3R
+      - agent_0_articulated_agent_jaw_depth       # Depth camera for Adapt3R
+      # - agent_0_jaw_intrinsics  # Camera intrinsics for Adapt3R
+      # - agent_0_jaw_extrinsics  # Camera extrinsics for Adapt3R
+      # Navigation sensors
       - agent_0_pointgoal_with_gps_compass
+      - agent_0_localization_sensor
+      - agent_0_human_num_sensor  
+      - agent_0_oracle_humanoid_future_trajectory
   task:
     actions:
       agent_0_discrete_stop:
@@ -86,24 +92,25 @@ habitat:
         ang_speed: 10.0
         allow_dyn_slide: True
 habitat_baselines:
-  evaluate: True
-  verbose: True 
-  trainer_name: "ddppo"
+  evaluate: True 
+  verbose: False 
+  trainer_name: "falcon_trainer" ## original ppo works for self._agent, but we need to train self._agent._agents[0]
   torch_gpu_id: 0
   tensorboard_dir: "evaluation/falcon/hm3d/tb"
   video_dir: "evaluation/falcon/hm3d/video"
   test_episode_count: -1
-  eval_ckpt_path_dir: "pretrained_model/falcon_noaux_25.pth"
   num_environments: 8
-  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints"
+  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints" # save_dir for training
+  eval_ckpt_path_dir: "evaluation/falcon/hm3d/checkpoints" 
   num_updates: -1
-  total_num_steps: 1e8
+  total_num_steps: 15000000 # exact steps 12560368
   log_interval: 10
-  num_checkpoints: 200
+  num_checkpoints: 20 # interrupt recovery
   # Force PyTorch to be single threaded as
   # this improves performance considerably
   force_torch_single_threaded: True
   load_resume_state_config: False
+  # train_ckpt: "evaluation/falcon/hm3d/checkpoints/latest.pth" # "evaluation/falcon/hm3d/checkpoints/ckpt.000020.pth"
 
   evaluator:
     _target_: habitat_baselines.rl.ppo.falcon_evaluator.FALCONEvaluator
@@ -111,7 +118,7 @@ habitat_baselines:
   eval:
     use_ckpt_config: False 
     should_load_ckpt: True
-    # video_option: ["disk"]
+    video_option: ["disk"]
 
   rl:
     agent:
@@ -122,8 +129,11 @@ habitat_baselines:
       agent_sample_interval: 20 
       force_partner_sample_idx: -1
     policy:
+      # Adapt3R policy for the main agent
       agent_0:
-        name: "PointNavResNetPolicy"
+        name: "Adapt3RPolicy"
+        action_distribution_type: "categorical"
+
     ppo:
       # ppo params
       clip_param: 0.2
@@ -134,7 +144,7 @@ habitat_baselines:
       lr: 2.5e-4
       eps: 1e-5
       max_grad_norm: 0.2
-      num_steps: 128
+      num_steps: 64
       use_gae: True
       gamma: 0.99
       tau: 0.95
@@ -144,8 +154,7 @@ habitat_baselines:
 
       use_normalized_advantage: False
 
-      hidden_size: 512
-
+      
       # Use double buffered sampling, typically helps
       # when environment time is similar or larger than
       # policy inference time during rollout generation
@@ -155,18 +164,53 @@ habitat_baselines:
       sync_frac: 0.6
       # The PyTorch distributed backend to use
       distrib_backend: NCCL
-      # Visual encoder backbone
-      pretrained_weights: pretrained_model/pretrained_habitat3.pth
-      # Initialize with pretrained weights
-      pretrained: True # For finetune
-      # Initialize just the visual encoder backbone with pretrained weights
-      pretrained_encoder: False
-      # Whether the visual encoder backbone will be trained.
+      
+      # Adapt3R: No pretrained weights available
+      pretrained: False
+      pretrained_encoder: False  
       train_encoder: True
       # Whether to reset the critic linear layer
       reset_critic: True
 
-      # Model parameters
-      backbone: resnet50
-      rnn_type: LSTM
-      num_recurrent_layers: 2
+
+      rnn_type: GRU       # Default, but Adapt3R uses its own RNN config  
+      num_recurrent_layers: 1
+      # Adapt3R network configuration
+      hidden_size: 256
+      normalize_visual_inputs: True
+
+      
+      # Adapt3R-specific configuration
+      adapt3r:
+        visual_encoder:
+          backbone_type: "resnet18"     # 使用 resnet18 更稳定，没有预训练模型
+          hidden_dim: 126               # 必须能被6整除 (NeRF positional encoding)
+          num_points: 256               # 点云采样数量
+          do_image: True                # 使用视觉特征
+          do_pos: True                  # 使用位置编码
+          do_rgb: False                 # 不使用原始RGB
+          finetune: True                # 训练视觉编码器 (没有预训练模型)
+          xyz_proj_type: "nerf"         # NeRF 位置编码
+          clip_model: "RN50"            # CLIP模型 (如果使用CLIP backbone)
+          
+          # 点云处理配置
+          do_crop: True                 # 启用点云裁剪
+          boundaries: [[-5.0, -5.0, 0.0], [5.0, 5.0, 3.0]]  # 裁剪边界 
+          
+          # 低维观测键 (导航相关传感器)
+          lowdim_obs_keys: 
+            - "pointgoal_with_gps_compass"
+            - "localization_sensor"
+      
+    auxiliary_losses: 
+      people_counting:
+        max_human_num: 6
+        loss_scale: 0.1   
+      guess_human_position:
+        max_human_num: 6
+        position_dim: 2
+        loss_scale: 0.1   
+      future_trajectory_prediction:
+        max_human_num: 6
+        future_step: 4
+        loss_scale: 0.1       
