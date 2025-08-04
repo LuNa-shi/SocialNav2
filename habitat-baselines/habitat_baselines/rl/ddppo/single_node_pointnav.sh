@@ -20,10 +20,10 @@ TOTAL_CPU_CORES=$((CPU_CORES_PER_GPU * TOTAL_GPU))
 # --config-name pointnav/ppo_pointnav_habitat_iccv19.yaml \
     # --config-name social_nav_v2/falcon_hm3d_train.yaml \
 set -x
-# OMP_NUM_THREADS=$CPU_CORES_PER_GPU \
+OMP_NUM_THREADS=$CPU_CORES_PER_GPU \
     python -u -m torch.distributed.launch \
     --use_env \
     --nproc_per_node $TOTAL_GPU \
     habitat-baselines/habitat_baselines/run.py \
-    --config-name social_nav_v2/falcon_ori_train.yaml \
-    > evaluation/falcon/hm3d/train.log 2>&1
+    --config-name pointnav/ddppo_pointnav.yaml \
+    > evaluation/pointnav_hm3d/train.log 2>&1

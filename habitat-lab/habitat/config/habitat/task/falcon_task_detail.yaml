@@ -21,7 +21,7 @@ defaults:
 
 type: MultiAgentPointNavTask-v0
 end_on_success: True
-reward_measure: "multi_agent_nav_reward"
+reward_measure: "distance_to_goal_reward"
 success_measure: "success"
 success_reward: 10.0
 slack_reward: -0.002

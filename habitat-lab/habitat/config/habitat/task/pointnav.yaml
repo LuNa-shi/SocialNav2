@@ -17,5 +17,5 @@ defaults:
 type: Nav-v0
 end_on_success: True
 reward_measure: "distance_to_goal_reward"
-success_measure: "spl"
+success_measure: "success"
 goal_sensor_uuid: pointgoal_with_gps_compass

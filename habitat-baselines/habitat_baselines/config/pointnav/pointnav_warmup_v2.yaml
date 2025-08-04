@@ -5,30 +5,61 @@
 # and should be used as the starting point instead.
 
 defaults:
-  - /benchmark/nav/pointnav: pointnav_hm3d
+  - /habitat: habitat_config_base
+  - /habitat/dataset/social_nav_v2: social-hm3d
   - /habitat_baselines: habitat_baselines_rl_config_base
+  - /habitat/task: pointnav
+  - /habitat/simulator/sensor_setups@habitat.simulator.agents.agent_0: spot_agent
+  - /habitat/simulator/agents@habitat.simulator.agents.agent_0: spot
+  - /habitat/task/actions@habitat.task.actions.agent_0_discrete_stop: discrete_stop
+  - /habitat/task/actions@habitat.task.actions.agent_0_discrete_move_forward: discrete_move_forward
+  - /habitat/task/actions@habitat.task.actions.agent_0_discrete_turn_left: discrete_turn_left
+  - /habitat/task/actions@habitat.task.actions.agent_0_discrete_turn_right: discrete_turn_right
+  - /habitat/task/lab_sensors@habitat.task.lab_sensors.agent_0_pointgoal_with_gps_compass: pointgoal_with_gps_compass_sensor
   - _self_
 
+habitat:
+  environment:
+    max_episode_steps: 500
+  dataset:
+    split: train
+  simulator:
+    type: RearrangeSim-v2
+    agents_order: [agent_0]
+  task:
+    actions:
+      agent_0_discrete_stop:
+        lin_speed: 0.0 
+        ang_speed: 0.0
+      agent_0_discrete_move_forward:
+        lin_speed: 25.0
+        ang_speed: 0.0
+        allow_dyn_slide: True
+      agent_0_discrete_turn_left:
+        lin_speed: 0.0
+        ang_speed: 10.0
+        allow_dyn_slide: True
+      agent_0_discrete_turn_right:
+        lin_speed: 0.0
+        ang_speed: -10.0
+        allow_dyn_slide: True
+
 habitat_baselines:
+  evaluate: False
   verbose: False
-  trainer_name: "ppo"
+  trainer_name: "ddppo"
   torch_gpu_id: 0
-  tensorboard_dir: "tb"
-  video_dir: "video_dir"
-  # Evaluate on all episodes
+  tensorboard_dir: "evaluation/pointnav_stage1/tb" # Using a separate directory for stage 1 logs
+  video_dir: "evaluation/pointnav_stage1/video"
   test_episode_count: -1
-  eval_ckpt_path_dir: "evaluation/pointnav_stage1/checkpoints_8_1"
-  # This was 6 for mp3d and 8 for gibson in the paper
-  num_environments: 8
-  checkpoint_folder: "evaluation/pointnav_stage1/checkpoints_8_1"
-  total_num_steps: 75e6
+  num_environments: 8 # Aligned with social nav config
+  checkpoint_folder: "evaluation/pointnav_stage1/checkpoints_731" # Using a separate directory for stage 1 checkpoints
+  total_num_steps: 15e6 # A reasonable starting point for pre-training
+  log_interval: 10
+  num_checkpoints: 20
   num_updates: -1
-  log_interval: 25
-  num_checkpoints: 100
-  # Force PyTorch to be single threaded as
-  # this improves performance considerably
   force_torch_single_threaded: True
-  load_resume_state_config: True
+  load_resume_state_config: False
 
   eval:
     video_option: [ ]
@@ -37,8 +68,10 @@ habitat_baselines:
 
   rl:
     policy:
-      main_agent:
-        name: "PointNavBaselinePolicy"
+      agent_0:
+        name: "Adapt3RPolicy"
+
+  
 
     ppo:
       # ppo params
@@ -91,4 +124,3 @@ habitat_baselines:
           # Social sensors like 'human_num_sensor' are removed for this stage.
           lowdim_obs_keys:
             - "pointgoal_with_gps_compass"
-

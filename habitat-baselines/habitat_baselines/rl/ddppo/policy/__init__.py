@@ -23,6 +23,14 @@ from .habitat_camera_sensors import (  # noqa: F401.
     CameraExtrinsicsSensor,
 )
 
+from .adapt3r_policy import (  # noqa: F401.
+    Adapt3RPolicy,
+)
+
+from .hybrid_adapt3r_policy import (  # noqa: F401.
+    HybridAdapt3RPolicy,
+)
+
 from . import habitat_camera_sensors
 
 # print('--------------------------------')

@@ -21,6 +21,7 @@
 # ---------------------------------------------------------------------------- #
 
 import math
+import os
 import einops
 import torch
 import torch.nn as nn
@@ -36,6 +37,13 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from gym import spaces
 from torch import Tensor
 from omegaconf import OmegaConf
+
+try:
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+except ImportError:
+    plt = None
+    Axes3D = None
 
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ppo.policy import Net, NetPolicy
@@ -150,6 +158,11 @@ class EnvUtils:
                 # The camera name is the part before '_rgb'
                 cam_name = parts[-2]
                 cam_names.add(cam_name)
+
+        if not cam_names:
+            cam_names = ['default']
+            return sorted(list(cam_names))
+        
         return sorted(list(cam_names))
 
     @staticmethod
@@ -162,6 +175,8 @@ class EnvUtils:
         # Heuristic: if name is 'jaw' or 'arm', it's part of articulated agent
         if name in ["jaw", "arm"]:
             return f"articulated_agent_{name}_rgb"
+        elif name == 'default':
+            return 'rgb'
         else:
             return f"{name}_rgb" # For keys like 'head_rgb'
 
@@ -174,6 +189,8 @@ class EnvUtils:
         """
         if name in ["jaw", "arm"]:
             return f"articulated_agent_{name}_depth"
+        elif name == 'default':
+            return 'depth'
         else:
             return f"{name}_depth"
         
@@ -468,6 +485,9 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         self.do_image, self.do_pos, self.do_rgb = do_image, do_pos, do_rgb
         self.hidden_dim = hidden_dim
         self.backbone_type = backbone_type
+        self.viz_counter = 0
+        self.viz_interval = 50
+        self.max_viz_frames = 10
         
         if backbone_type in ["resnet18", "resnet50"]:
             self.backbone, self.normalize = load_resnet_features(backbone_type, pretrained=True)
@@ -495,8 +515,87 @@ class Adapt3REncoder(PointCloudBaseEncoder):
     @property
     def is_blind(self): return not self.do_image
 
+    def _visualize_point_cloud(self, observations: Dict[str, Tensor], pcds_world: Tensor):
+        """
+        Generates and saves a visualization of the RGB image, depth map, and 3D point cloud.
+        """
+        try:
+            # --- Get data for visualization (from the first item in the batch) ---
+            cam_name = EnvUtils.list_cameras(self.observation_space)[0]
+
+            rgb_image = observations[EnvUtils.camera_name_to_image_key(cam_name)][0].cpu().numpy()
+            depth_image = observations[EnvUtils.camera_name_to_depth_key(cam_name)][0].cpu().numpy().squeeze()
+            
+            pcd_to_viz = pcds_world[0, 0].cpu().numpy()
+            
+            # --- Create Plot ---
+            fig = plt.figure(figsize=(18, 6))
+
+            # Plot 1: RGB
+            ax1 = fig.add_subplot(1, 3, 1)
+            ax1.imshow(rgb_image)
+            ax1.set_title("RGB Image")
+            ax1.axis('off')
+
+            # Plot 2: Depth
+            ax2 = fig.add_subplot(1, 3, 2)
+            ax2.imshow(depth_image, cmap='viridis')
+            ax2.set_title("Depth Image")
+            ax2.axis('off')
+
+            # Plot 3: 3D Point Cloud
+            ax3 = fig.add_subplot(1, 3, 3, projection='3d')
+            
+            num_points_to_viz = 2048
+            if pcd_to_viz.shape[0] > num_points_to_viz:
+                sample_indices = np.random.choice(pcd_to_viz.shape[0], num_points_to_viz, replace=False)
+                pcd_sample = pcd_to_viz[sample_indices]
+            else:
+                pcd_sample = pcd_to_viz
+
+            ax3.scatter(pcd_sample[:, 0], pcd_sample[:, 1], pcd_sample[:, 2], s=0.5)
+            ax3.set_title("3D Point Cloud")
+            ax3.set_xlabel("X")
+            ax3.set_ylabel("Y")
+            ax3.set_zlabel("Z")
+            
+            try:
+                ax3.set_box_aspect([np.ptp(pcd_sample[:, i]) for i in range(3)])
+            except Exception:
+                pass
+
+            # --- Save Figure ---
+            pid = os.getpid()
+            viz_dir = "visualizations"
+            os.makedirs(viz_dir, exist_ok=True)
+            save_path = os.path.join(viz_dir, f"point_cloud_viz_pid{pid}_frame{self.viz_counter}.png")
+            plt.tight_layout()
+            plt.savefig(save_path)
+            plt.close(fig)
+            print(f"Saved point cloud visualization to {save_path}")
+
+        except Exception as e:
+            print(f"Visualization failed: {e}")
+
     def forward(self, observations: Dict[str, Tensor]) -> Tuple[Tensor, Optional[Tensor]]:
         pcds_world = self._build_point_cloud(observations) # (B, N_cam, H*W, 3)
+        
+        # Check if we should visualize in this step
+        if (
+            plt is not None
+            and self.viz_counter < self.max_viz_frames
+            and self.training # Typically only visualize during training
+            and (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0 or not torch.distributed.is_initialized())
+        ):
+            # Simple global step counter proxy
+            if not hasattr(self, "_global_step"):
+                self._global_step = 0
+            
+            if self._global_step % self.viz_interval == 0:
+                self._visualize_point_cloud(observations, pcds_world)
+                self.viz_counter += 1
+            
+            self._global_step += 1
         
         rgb_tensors_uint8 = [
             observations[EnvUtils.camera_name_to_image_key(cam)] 
@@ -692,10 +791,11 @@ class Adapt3RPolicy(NetPolicy):
         # Build policy configuration from config sections
         policy_config = OmegaConf.create({
             'name': 'Adapt3RPolicy',
-            'action_distribution_type': config.habitat_baselines.rl.policy.agent_0.get('action_distribution_type', 'categorical'),
-            'hidden_size': config.habitat_baselines.rl.ddppo.hidden_size,
-            'rnn_type': config.habitat_baselines.rl.ddppo.adapt3r.rnn_type,
-            'num_recurrent_layers': config.habitat_baselines.rl.ddppo.adapt3r.num_recurrent_layers,
+            # changed to main_agent when pointnav
+            'action_distribution_type': config.habitat_baselines.rl.policy.main_agent.get('action_distribution_type', 'categorical'),
+            'hidden_size': config.habitat_baselines.rl.ppo.hidden_size,
+            'rnn_type': config.habitat_baselines.rl.ddppo.rnn_type,
+            'num_recurrent_layers': config.habitat_baselines.rl.ddppo.num_recurrent_layers,
             'visual_encoder': config.habitat_baselines.rl.ddppo.adapt3r.visual_encoder
         })
 

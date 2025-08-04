@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - /benchmark/nav/pointnav: pointnav_gibson
+  - /benchmark/nav/pointnav: pointnav_hm3d
   - /habitat_baselines: habitat_baselines_rl_config_base
   - _self_
 
@@ -12,9 +12,9 @@ habitat_baselines:
   tensorboard_dir: "tb"
   video_dir: "video_dir"
   test_episode_count: -1
-  eval_ckpt_path_dir: "data/new_checkpoints"
+  eval_ckpt_path_dir: "evaluation/pointnav_hm3d/checkpoints_84_adapt3r"
   num_environments: 4
-  checkpoint_folder: "data/new_checkpoints"
+  checkpoint_folder: "evaluation/pointnav_hm3d/checkpoints_84_adapt3r"
   num_updates: -1
   total_num_steps: 2.5e9
   log_interval: 10
@@ -26,7 +26,7 @@ habitat_baselines:
   rl:
     policy:
       main_agent:
-        name: "PointNavResNetPolicy"
+        name: "Adapt3RPolicy"
 
     ppo:
       # ppo params
@@ -70,7 +70,25 @@ habitat_baselines:
       # Whether to reset the critic linear layer
       reset_critic: True
 
-      # Model parameters
-      backbone: resnet50
       rnn_type: LSTM
       num_recurrent_layers: 2
+
+      adapt3r:
+        visual_encoder:
+          backbone_type: "resnet18"     # 使用 resnet18 更稳定，没有预训练模型
+          hidden_dim: 126               # 必须能被6整除 (NeRF positional encoding)
+          num_points: 256               # 点云采样数量
+          do_image: True                # 使用视觉特征
+          do_pos: True                  # 使用位置编码
+          do_rgb: False                 # 不使用原始RGB
+          finetune: True                # 训练视觉编码器 (没有预训练模型)
+          xyz_proj_type: "nerf"         # NeRF 位置编码
+          clip_model: "RN50"            # CLIP模型 (如果使用CLIP backbone)
+          
+          # 点云处理配置
+          do_crop: True                 # 启用点云裁剪
+          boundaries: [[-5.0, -5.0, 0.0], [5.0, 5.0, 3.0]]  # 裁剪边界 
+          
+          # 低维观测键 (导航相关传感器)
+          lowdim_obs_keys: 
+            - "pointgoal_with_gps_compass"

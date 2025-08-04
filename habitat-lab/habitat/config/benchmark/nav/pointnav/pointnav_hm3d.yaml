@@ -8,6 +8,7 @@ defaults:
 habitat:
   environment:
     max_episode_steps: 500
+
   simulator:
     agents:
       main_agent:

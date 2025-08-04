@@ -124,12 +124,12 @@ class DecentralizedDistributedMixin:
                         model,
                         device_ids=[device],
                         output_device=device,
-                        find_unused_parameters=find_unused_params,  # 启用未使用参数检测
+                        find_unused_parameters=True,  # 启用未使用参数检测
                     )
                 else:
                     self.ddp = torch.nn.parallel.DistributedDataParallel(
                         model,
-                        find_unused_parameters=find_unused_params,  # 启用未使用参数检测
+                        find_unused_parameters=True,  # 启用未使用参数检测
                     )
 
         self._evaluate_actions_wrapper = Guard(_EvalActionsWrapper(self.actor_critic), self.device)  # type: ignore

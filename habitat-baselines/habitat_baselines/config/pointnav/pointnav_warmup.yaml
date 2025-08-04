@@ -1,0 +1,194 @@
+# @package _global_
+
+# This configuration is for the first stage of a two-stage training process.
+# Goal: Train a base navigation policy (PointNav) using the Adapt3R model.
+# This pre-trained model will then be fine-tuned on the SocialNav task.
+
+defaults:
+  - /habitat: habitat_config_base
+  - /habitat/task: pointnav # Using the standard PointNav task definition as a base
+  - /habitat/simulator/sensor_setups@habitat.simulator.agents.agent_0: spot_agent # Using the same agent sensor setup
+  - /habitat/simulator/agents@habitat.simulator.agents.agent_0: spot # Defining the agent as the Spot robot
+  - /habitat/dataset/social_nav_v2: social-hm3d
+  - /habitat_baselines: habitat_baselines_rl_config_base
+  - /habitat/task/actions@habitat.task.actions.discrete_stop: discrete_stop
+  - /habitat/task/actions@habitat.task.actions.discrete_move_forward: discrete_move_forward
+  - /habitat/task/actions@habitat.task.actions.discrete_turn_left: discrete_turn_left
+  - /habitat/task/actions@habitat.task.actions.discrete_turn_right: discrete_turn_right
+  - _self_
+
+habitat:
+  environment:
+    max_episode_steps: 500 # Aligned with social nav config
+  
+  simulator:
+    type: RearrangeSim-v2 # Must use RearrangeSim-v2 to support the articulated Spot agent
+    # --- Agent Configuration ---
+    # Aligned with your social nav config to ensure model compatibility
+    agents:
+      agent_0:
+        sim_sensors:
+          # The Adapt3R policy requires these specific jaw sensors
+          jaw_rgb_sensor:
+            type: HabitatSimRGBSensor
+            height: 256
+            width: 256
+            hfov: 90
+            position:
+            - 0.0
+            - 1.25
+            - 0.0
+            orientation:
+            - 0.0
+            - 0.0
+            - 0.0
+            sensor_subtype: PINHOLE
+            noise_model: None
+            noise_model_kwargs: {}
+          jaw_depth_sensor:
+            type: HabitatSimDepthSensor
+            height: 256
+            width: 256
+            hfov: 90
+            min_depth: 0.0
+            max_depth: 10.0
+            normalize_depth: true
+            position:
+            - 0.0
+            - 1.25
+            - 0.0
+            orientation:
+            - 0.0
+            - 0.0
+            - 0.0
+            sensor_subtype: PINHOLE
+            noise_model: None
+            noise_model_kwargs: {}
+    kinematic_mode: True
+    habitat_sim_v0:
+      gpu_device_id: 0
+      allow_sliding: True
+      enable_physics: True 
+  
+  # --- Task Configuration ---
+  # Simplified for pure point navigation
+  task:
+    actions:
+      discrete_stop:
+        lin_speed: 0.0 
+        ang_speed: 0.0
+      discrete_move_forward:
+        lin_speed: 25.0
+        ang_speed: 0.0
+        allow_dyn_slide: True
+      discrete_turn_left:
+        lin_speed: 0.0
+        ang_speed: 10.0
+        allow_dyn_slide: True
+      discrete_turn_right:
+        lin_speed: 0.0
+        ang_speed: -10.0
+        allow_dyn_slide: True
+
+    # LAB sensors required by the policy and task
+    lab_sensors:
+      localization_sensor: # Required by Adapt3R's lowdim_obs_keys
+        type: LocalizationSensor
+
+
+
+
+
+  # --- Gym Wrapper Configuration ---
+  gym:
+    # Observation keys must match what the Adapt3R policy expects
+    obs_keys:
+      - articulated_agent_jaw_rgb
+      - articulated_agent_jaw_depth
+      - pointgoal_with_gps_compass
+      - localization_sensor
+
+
+
+habitat_baselines:
+  evaluate: False # True
+  verbose: True
+  trainer_name: "falcon_trainer" # Changed from 'ppo' to match your social nav setup
+  torch_gpu_id: 0
+  tensorboard_dir: "evaluation/pointnav_stage1/tb" # Using a separate directory for stage 1 logs
+  video_dir: "evaluation/pointnav_stage1/video"
+  test_episode_count: -1
+  num_environments: 8 # Aligned with social nav config
+  checkpoint_folder: "evaluation/pointnav_stage1/checkpoints" # Using a separate directory for stage 1 checkpoints
+  total_num_steps: 15e6 # A reasonable starting point for pre-training
+  log_interval: 10
+  num_checkpoints: 20
+  num_updates: -1
+  force_torch_single_threaded: True
+  load_resume_state_config: False
+
+  rl:
+    # Using 'agent_0' key for the policy to match the MultiAgent setup it will be loaded into later
+    policy:
+      agent_0:
+        name: "Adapt3RPolicy" # Changed from 'PointNavBaselinePolicy'
+        action_distribution_type: "categorical"
+
+      
+    
+    ppo:
+      # PPO hyperparameters are aligned with your social nav config for consistency
+      clip_param: 0.2
+      ppo_epoch: 2
+      num_mini_batch: 2
+      value_loss_coef: 0.5
+      entropy_coef: 0.01
+      lr: 2.5e-4
+      eps: 1e-5
+      max_grad_norm: 0.2
+      num_steps: 64
+      use_gae: True
+      gamma: 0.99
+      tau: 0.95
+      use_linear_clip_decay: False
+      use_linear_lr_decay: False
+      reward_window_size: 50
+      use_normalized_advantage: False
+      hidden_size: 256
+      use_double_buffered_sampler: False
+
+    ddppo:
+      # This entire section is copied from your social nav config to ensure an identical model architecture.
+      sync_frac: 0.6
+      distrib_backend: NCCL
+      pretrained: False
+      pretrained_encoder: False
+      train_encoder: True
+      reset_critic: True
+      rnn_type: GRU
+      num_recurrent_layers: 1
+      
+      # --- Adapt3R Configuration ---
+      # This block MUST be identical to your social nav config's Adapt3R block.
+      adapt3r:
+        visual_encoder:
+          backbone_type: "clip"
+          hidden_dim: 126
+          num_points: 256
+          do_image: True
+          do_pos: True
+          do_rgb: False
+          finetune: False
+          xyz_proj_type: "nerf"
+          clip_model: "RN50"
+          do_crop: True
+          boundaries: [[-5.0, -5.0, 0.0], [5.0, 5.0, 3.0]]
+          # lowdim_obs_keys are simplified, containing only the navigation sensors.
+          # Social sensors like 'human_num_sensor' are removed for this stage.
+          lowdim_obs_keys:
+            - "pointgoal_with_gps_compass"
+            - "localization_sensor"
+
+    # --- Auxiliary Losses REMOVED ---
+    # The 'auxiliary_losses' block is completely removed as there are no humans
+    # in this stage, so losses like 'people_counting' are not applicable.
