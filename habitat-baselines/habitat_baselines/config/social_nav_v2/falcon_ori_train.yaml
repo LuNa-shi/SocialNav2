@@ -104,7 +104,7 @@ habitat_baselines:
   # Force PyTorch to be single threaded as
   # this improves performance considerably
   force_torch_single_threaded: True
-  load_resume_state_config: True
+  load_resume_state_config: False
 
   evaluator:
     _target_: habitat_baselines.rl.ppo.falcon_evaluator.FALCONEvaluator
@@ -156,7 +156,7 @@ habitat_baselines:
       # The PyTorch distributed backend to use
       distrib_backend: NCCL
       # Visual encoder backbone
-      pretrained_weights: pretrained_model/falcon_no_aux.pth
+      pretrained_weights: pretrained_model/falcon_noaux_25.pth
       # Initialize with pretrained weights
       pretrained: True # For finetune
       # Initialize just the visual encoder backbone with pretrained weights
