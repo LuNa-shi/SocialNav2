@@ -28,8 +28,8 @@ habitat:
     split: train
   gym:
     obs_keys: 
-      # - agent_0_articulated_agent_jaw_rgb # use it if add RGB camera
-      - agent_0_articulated_agent_jaw_depth
+      - agent_0_articulated_agent_jaw_rgb    # 添加RGB观察
+      - agent_0_articulated_agent_jaw_depth  # 保留深度观察
       - agent_0_pointgoal_with_gps_compass
       - agent_0_localization_sensor
       - agent_0_human_num_sensor  
@@ -87,16 +87,17 @@ habitat:
         lin_speed: 10.0
         ang_speed: 10.0
         allow_dyn_slide: True
+
 habitat_baselines:
   evaluate: False # True
   verbose: True
   trainer_name: "falcon_trainer" ## original ppo works for self._agent, but we need to train self._agent._agents[0]
   torch_gpu_id: 0
-  tensorboard_dir: "evaluation/falcon/hm3d/tb_84ori"
-  video_dir: "evaluation/falcon/hm3d/video_84ori"
+  tensorboard_dir: "evaluation/falcon/hm3d/tb_dual_modal"
+  video_dir: "evaluation/falcon/hm3d/video_dual_modal"
   test_episode_count: -1
   num_environments: 8
-  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_84ori" # save_dir for training
+  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_dual_modal" # save_dir for training
   num_updates: -1
   total_num_steps: 15000000 # exact steps 12560368
   log_interval: 10
@@ -123,7 +124,17 @@ habitat_baselines:
       force_partner_sample_idx: -1
     policy:
       agent_0:
-        name: "PointNavResNetPolicy"
+        name: "DualModalPointNavResNetPolicy"   # Use the new policy
+        
+
+        rgb_pretrained_imagenet: True
+        # 2. Load your custom checkpoint for depth backbone + RNN
+        depth_pretrained: True
+        depth_pretrained_weights: "pretrained_model/pretrained_habitat3.pth"
+        
+        # 3. Freeze the layers you just loaded
+        freeze_depth_backbone: True
+        freeze_rnn: True
     ppo:
       # ppo params
       clip_param: 0.2
@@ -156,9 +167,9 @@ habitat_baselines:
       # The PyTorch distributed backend to use
       distrib_backend: NCCL
       # Visual encoder backbone
-      pretrained_weights: pretrained_model/falcon_no_aux.pth
+      pretrained_weights: pretrained_model/pretrained_habitat3.pth
       # Initialize with pretrained weights
-      pretrained: True # For finetune
+      pretrained: False # For finetune
       # Initialize just the visual encoder backbone with pretrained weights
       pretrained_encoder: False
       # Whether the visual encoder backbone will be trained.
@@ -167,7 +178,9 @@ habitat_baselines:
       reset_critic: True
 
       # Model parameters
-      backbone: resnet50
+      
+      rgb_backbone: resnet18           # RGB 图像骨干网络
+      depth_backbone: resnet50        # 深度图像骨干网络
       rnn_type: LSTM
       num_recurrent_layers: 2
       

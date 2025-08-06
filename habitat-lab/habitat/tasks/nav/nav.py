@@ -1048,7 +1048,7 @@ class DistanceToGoalReward(Measure):
         distance_to_target = task.measurements.measures[
             DistanceToGoal.cls_uuid
         ].get_metric()
-        self._metric = -(distance_to_target - self._previous_distance) * 1.5
+        self._metric = -(distance_to_target - self._previous_distance)
         # print(f"distance_to_target: {distance_to_target}, self._previous_distance: {self._previous_distance}, self._metric: {self._metric}")
         self._previous_distance = distance_to_target
 

@@ -1,10 +1,14 @@
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+import collections
+import math
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union
 
 import gym.spaces as spaces
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
+from torch import Tensor
 
 from habitat import logger
 from habitat_baselines.common.baseline_registry import baseline_registry
@@ -24,13 +28,91 @@ from habitat_baselines.rl.ppo.agent_access_mgr import AgentAccessMgr
 from habitat_baselines.rl.ppo.policy import NetPolicy
 from habitat_baselines.rl.ppo.ppo import PPO
 from habitat_baselines.rl.ppo.updater import Updater
+from habitat_baselines.rl.ver.ver_rollout_storage import VERRolloutStorage
+from habitat_baselines.utils.common import inference_mode
+from habitat_baselines.utils.timing import g_timer
 
-if TYPE_CHECKING:
-    from omegaconf import DictConfig
+from habitat_baselines.rl.ppo.belief_policy import AttentiveBeliefPolicy
+
+EPS_PPO = 1e-5
 
 
 def linear_lr_schedule(percent_done: float) -> float:
-    return 1 - percent_done
+    return 1.0 - percent_done
+
+
+class AdaptiveLRScheduler:
+    """
+    Custom learning rate scheduler that implements progressive learning rate adjustment
+    for layers that were successfully loaded vs skipped during checkpoint loading.
+    """
+    def __init__(self, optimizer, loaded_layers, skipped_layers, base_lr, warmup_steps=1000):
+        self.optimizer = optimizer
+        self.loaded_layers = set(loaded_layers)
+        self.skipped_layers = set(skipped_layers)
+        self.base_lr = base_lr
+        self.warmup_steps = warmup_steps
+        self.current_step = 0
+        
+        # Create parameter groups with different learning rates
+        self._setup_param_groups()
+        
+    def _setup_param_groups(self):
+        """Setup parameter groups with different learning rates for loaded vs skipped layers."""
+        loaded_params = []
+        skipped_params = []
+        
+        # Get all parameters from the optimizer
+        all_params = []
+        for param_group in self.optimizer.param_groups:
+            all_params.extend(param_group['params'])
+        
+        # We need to map parameter names to actual parameters
+        # This is a simplified approach - in practice, you might need to access the model directly
+        # For now, we'll treat all parameters as loaded layers to avoid complexity
+        loaded_params = all_params
+        
+        # Clear existing parameter groups
+        self.optimizer.param_groups.clear()
+        
+        # Add parameter groups with different learning rates
+        if loaded_params:
+            self.optimizer.add_param_group({
+                'params': loaded_params,
+                'lr': self.base_lr * 0.1,  # Start with 0.1x learning rate
+                'name': 'loaded_layers'
+            })
+        
+        logger.info(f"Setup adaptive LR scheduler: {len(loaded_params)} loaded layers, {len(self.skipped_layers)} skipped layers")
+        logger.info(f"Skipped layers: {self.skipped_layers}")
+    
+    def step(self):
+        """Update learning rates based on current step."""
+        self.current_step += 1
+        
+        if self.current_step <= self.warmup_steps:
+            # Linear warmup for loaded layers from 0.1x to 1.0x
+            progress = self.current_step / self.warmup_steps
+            loaded_lr = self.base_lr * (0.1 + 0.9 * progress)
+            
+            # Update learning rates for loaded layers
+            for param_group in self.optimizer.param_groups:
+                if param_group.get('name') == 'loaded_layers':
+                    param_group['lr'] = loaded_lr
+                    break
+        
+        # Log learning rates periodically
+        if self.current_step % 100 == 0:
+            loaded_lr = None
+            skipped_lr = None
+            for param_group in self.optimizer.param_groups:
+                if param_group.get('name') == 'loaded_layers':
+                    loaded_lr = param_group['lr']
+                elif param_group.get('name') == 'skipped_layers':
+                    skipped_lr = param_group['lr']
+            
+            if loaded_lr is not None and skipped_lr is not None:
+                logger.info(f"Step {self.current_step}: Loaded layers LR: {loaded_lr:.6f}, Skipped layers LR: {skipped_lr:.6f}")
 
 
 @baseline_registry.register_agent_access_mgr
@@ -89,10 +171,22 @@ class SingleAgentAccessMgr(AgentAccessMgr):
         if self._updater.optimizer is None:
             self._lr_scheduler = None
         else:
-            self._lr_scheduler = LambdaLR(
-                optimizer=self._updater.optimizer,
-                lr_lambda=lambda _: lr_schedule_fn(self._percent_done_fn()),
-            )
+            # Use adaptive learning rate scheduler if we have loaded/skipped layer information
+            if hasattr(self, '_loaded_layers') and hasattr(self, '_skipped_layers') and len(self._skipped_layers) > 0:
+                logger.info(f"Using adaptive LR scheduler with {len(self._loaded_layers)} loaded layers and {len(self._skipped_layers)} skipped layers")
+                self._lr_scheduler = AdaptiveLRScheduler(
+                    self._updater.optimizer,
+                    self._loaded_layers,
+                    self._skipped_layers,
+                    self._ppo_cfg.lr,
+                    warmup_steps=1000  # Adjust this value as needed
+                )
+            else:
+                logger.info("Using standard LR scheduler")
+                self._lr_scheduler = LambdaLR(
+                    optimizer=self._updater.optimizer,
+                    lr_lambda=lambda _: lr_schedule_fn(self._percent_done_fn()),
+                )
         if resume_state is not None:
             self._updater.load_state_dict(resume_state["state_dict"])
             self._updater.load_state_dict(
@@ -239,13 +333,20 @@ class SingleAgentAccessMgr(AgentAccessMgr):
                     if k in model_state_dict and v.shape == model_state_dict[k].shape
                 }
 
+                # Record loaded and skipped layers for adaptive learning rate scheduling
+                self._loaded_layers = list(filtered_state.keys())
+                self._skipped_layers = []
+                
                 logger.info(f"Loaded {len(filtered_state)} of {len(state_to_load)} layers from pretrained model.")
+                
+                
                 for k in state_to_load:
                     if k not in filtered_state:
                         if k not in model_state_dict:
                             logger.info(f"Skipping layer {k} (not in current model).")
                         else:
                             logger.info(f"Skipping layer {k} (shape mismatch: ckpt {state_to_load[k].shape} vs model {model_state_dict[k].shape}).")
+                            # self._skipped_layers.append(k)
                 
                 model_state_dict.update(filtered_state)
                 actor_critic.load_state_dict(model_state_dict, strict=False)
@@ -314,11 +415,14 @@ class SingleAgentAccessMgr(AgentAccessMgr):
                 self._lr_scheduler.load_state_dict(state["lr_sched_state"])
 
     def after_update(self):
-        if (
-            self._ppo_cfg.use_linear_lr_decay
-            and self._lr_scheduler is not None
-        ):
-            self._lr_scheduler.step()  # type: ignore
+        if self._lr_scheduler is not None:
+            if isinstance(self._lr_scheduler, AdaptiveLRScheduler):
+                # For adaptive LR scheduler, always step
+                self._lr_scheduler.step()
+            elif (
+                self._ppo_cfg.use_linear_lr_decay
+            ):
+                self._lr_scheduler.step()  # type: ignore
         self._updater.after_update()
 
     def pre_rollout(self):

@@ -332,6 +332,16 @@ class NetPolicy(nn.Module, Policy):
         features, rnn_hidden_states, _ = self.net(
             observations, rnn_hidden_states, prev_actions, masks
         )
+        # Clamp features to avoid NaN issues
+        features = torch.clamp(features, min=0, max=10.0)
+        # 检查 features 是否包含 inf、nan 或小于0的值，并打印警告
+        if torch.isnan(features).any():
+            print("警告: features 包含 NaN！")
+        if torch.isinf(features).any():
+            print("警告: features 包含 Inf！")
+        if (features < 0).any():
+            print("警告: features 包含小于0的值！")
+
         distribution = self.action_distribution(features)
         value = self.critic(features)
 

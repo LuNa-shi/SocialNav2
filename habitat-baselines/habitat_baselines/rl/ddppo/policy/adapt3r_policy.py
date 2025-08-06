@@ -101,8 +101,8 @@ class PointCloudUtils:
         pos_x = pos_x.expand(B, ncam, -1, -1)
         pos_y = pos_y.expand(B, ncam, -1, -1)
 
-        x_coords = (pos_x - cx) * depth / fx
-        y_coords = (pos_y - cy) * depth / fy
+        x_coords = (pos_x - cx) * depth / (fx + 1e-8)
+        y_coords = (pos_y - cy) * depth / (fy + 1e-8)
         
         pcd_cam = torch.stack([x_coords, y_coords, depth], dim=-1)
         return einops.rearrange(pcd_cam, 'b ncam h w c -> b ncam (h w) c')
@@ -234,6 +234,11 @@ class PositionalEncodings:
             emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
             return einops.rearrange(emb, '... i j -> ... (i j)')
 
+def _check_nan(tensor: torch.Tensor, name: str):
+    """Checks a tensor for NaN or Inf values and prints a debug message."""
+    if not torch.isfinite(tensor).all():
+        print(f"NaN or Inf detected in '{name}' | Shape: {tensor.shape} | Contains NaN: {torch.isnan(tensor).any()} | Contains Inf: {torch.isinf(tensor).any()}")
+
 def weight_init(m):
     # Skip initialization for CLIP models to preserve pretrained weights
     # and avoid half precision issues
@@ -303,30 +308,67 @@ def load_resnet_features(name: str, pretrained: bool = True):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     return model, normalize
 
+class ModifiedResNetFeatures(ModifiedResNet):
+    """
+    A CLIP ResNet backbone modified to return intermediate layer features.
+    The __init__ method is inherited from the original ModifiedResNet.
+    """
+    def forward(self, x: torch.Tensor):
+        # Ensure input tensor has the same data type as the model's weights
+        x = x.type(self.conv1.weight.dtype)
+
+        # Pass through the ResNet stem
+        x = self.relu1(self.bn1(self.conv1(x)))
+        x = self.relu2(self.bn2(self.conv2(x)))
+        x = self.relu3(self.bn3(self.conv3(x)))
+        x = self.avgpool(x)
+
+        # Pass through the main layers
+        x0 = self.layer1(x)
+        x1 = self.layer2(x0)
+        x2 = self.layer3(x1)
+        x3 = self.layer4(x2)
+        
+        # Return a dictionary of the intermediate features
+        return {'layer1': x0, 'layer2': x1, 'layer3': x2, 'layer4': x3}
+
+
 def load_clip_features(model="RN50"):
+    """
+    Loads a CLIP visual backbone modified to return intermediate features.
+
+    Args:
+        model (str): The ResNet-based CLIP model to load (e.g., "RN50").
+
+    Returns:
+        A tuple of (backbone, normalize), where 'backbone' is the modified
+        visual model and 'normalize' is the required image normalization transform.
+    """
     if clip is None:
         raise ImportError("CLIP not installed, cannot use CLIP backbone.")
+        
+    # Load the official pre-trained model and its state dictionary
     clip_model, clip_transforms = clip.load(model)
+    state_dict = clip_model.state_dict()
     
-    class ModifiedResNetFeatures(ModifiedResNet):
-        def forward(self, x: torch.Tensor):
-            def stem(x):
-                x = self.relu1(self.bn1(self.conv1(x)))
-                x = self.relu2(self.bn2(self.conv2(x)))
-                x = self.relu3(self.bn3(self.conv3(x)))
-                x = self.avgpool(x)
-                return x
-            x = x.type(self.conv1.weight.dtype)
-            x = stem(x)
-            x0 = self.layer1(x)
-            x1 = self.layer2(x0)
-            x2 = self.layer3(x1)
-            x3 = self.layer4(x2)
-            return {'layer1': x0, 'layer2': x1, 'layer3': x2, 'layer4': x3}
-
-    clip_model.visual.__class__ = ModifiedResNetFeatures
+    # Dynamically determine the architecture from the loaded model
+    layers = tuple(
+        len(set(k.split(".")[2] for k in state_dict if k.startswith(f"visual.layer{b}")))
+        for b in [1, 2, 3, 4]
+    )
+    output_dim = state_dict["text_projection"].shape[1]
+    heads = state_dict["visual.layer1.0.conv1.weight"].shape[0] * 32 // 64
+    
+    # 1. Instantiate our custom model with the correct architecture
+    backbone = ModifiedResNetFeatures(layers, output_dim, heads)
+    
+    # 2. Load the pre-trained weights from the original model
+    backbone.load_state_dict(clip_model.visual.state_dict())
+    
+    # 3. Get the corresponding normalization function
     normalize = clip_transforms.transforms[-1]
-    return clip_model.visual, normalize
+    
+    return backbone, normalize
 
 class PointCloudBaseEncoder(nn.Module):
     def __init__(self, observation_space, num_points, lowdim_obs_keys, do_crop=True, boundaries=None, downsample_mode='pos'):
@@ -478,10 +520,12 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         self, observation_space, backbone_type: str, hidden_dim: int, num_points: int,
         do_image: bool, do_pos: bool, do_rgb: bool, finetune: bool,
         xyz_proj_type: str, clip_model: str, lowdim_obs_keys: List[str],
-        do_crop: bool, boundaries: List[List[float]]
+        do_crop: bool, boundaries: List[List[float]],
+        debug_nan: bool = False
     ):
         super().__init__(observation_space, num_points, lowdim_obs_keys, do_crop, boundaries)
         
+        self.debug_nan = debug_nan
         self.do_image, self.do_pos, self.do_rgb = do_image, do_pos, do_rgb
         self.hidden_dim = hidden_dim
         self.backbone_type = backbone_type
@@ -493,7 +537,10 @@ class Adapt3REncoder(PointCloudBaseEncoder):
             self.backbone, self.normalize = load_resnet_features(backbone_type, pretrained=True)
             fpn_in_channels_list = [256, 512, 1024, 2048] if backbone_type == 'resnet50' else [64, 128, 256, 512]
         elif backbone_type == "clip":
+            if clip_model not in ["RN50", "RN101", "RN50x4", "RN50x16", "RN50x64"]:
+                raise NotImplementedError(f"CLIP model {clip_model} is not a supported ResNet variant.")
             self.backbone, self.normalize = load_clip_features(clip_model)
+            # These channel numbers are specific to ResNet-based CLIP models (like RN50)
             fpn_in_channels_list = [256, 512, 1024, 2048] # For RN50
         else:
             raise NotImplementedError(f"Backbone type {backbone_type} not supported")
@@ -580,6 +627,7 @@ class Adapt3REncoder(PointCloudBaseEncoder):
     def forward(self, observations: Dict[str, Tensor]) -> Tuple[Tensor, Optional[Tensor]]:
         pcds_world = self._build_point_cloud(observations) # (B, N_cam, H*W, 3)
         
+        _check_nan(pcds_world, "pcds_world")
         # Check if we should visualize in this step
         if (
             plt is not None
@@ -622,18 +670,25 @@ class Adapt3REncoder(PointCloudBaseEncoder):
 
         with torch.set_grad_enabled(self.backbone.training):
             rgb_features_dict = self.backbone(self.normalize(rgb_batch))
+            if isinstance(rgb_features_dict, dict):
+                # print("rgb_features_dict:")
+                for k, v in rgb_features_dict.items():
+                    if torch.is_tensor(v):
+                        _check_nan(v, k)
+            
             # 清理大型输入张量
             del rgb_batch
             torch.cuda.empty_cache()
         
-        # Convert CLIP features to float32 for compatibility with FPN
-        if self.backbone_type == 'clip':
-            rgb_features_dict = {k: v.float() for k, v in rgb_features_dict.items()}
+
         
         fpn_features_dict = self.feature_pyramid({f'layer{i+1}': v for i, v in enumerate(rgb_features_dict.values())})
         # 清理特征字典
         del rgb_features_dict
         torch.cuda.empty_cache()
+
+        for k, v in fpn_features_dict.items():
+            _check_nan(v, k)
         
         # Use available key if expected key doesn't exist
         if self.fpn_output_key in fpn_features_dict:
@@ -676,7 +731,9 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         pcd_flat, rgb_features_flat = pcd_flat * mask.unsqueeze(-1), rgb_features_flat * mask.unsqueeze(-1)
         
         pcd_down, feats_down = self._downsample_point_cloud(pcd_flat, rgb_features_flat)
-        
+        _check_nan(pcd_down, "pcd_down")
+        _check_nan(feats_down, "feats_down")
+
         pcd_pos_emb = self.xyz_proj(pcd_down)
         
         cat_cloud = []
@@ -687,6 +744,8 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         perception_out = torch.max(self.pointcloud_extractor(final_cloud_features), dim=1)[0]
         
         lowdim_out = self._encode_lowdim(observations)
+        _check_nan(perception_out, "perception_out")
+        _check_nan(lowdim_out, "lowdim_out")
 
         return perception_out, lowdim_out
 
@@ -745,9 +804,12 @@ class Adapt3RNet(Net):
         
         cat_features = torch.cat(x, dim=1)
         
+        _check_nan(cat_features, "cat_features")
         out, rnn_hidden_states = self.state_encoder(
             cat_features, rnn_hidden_states, masks, rnn_build_seq_info
         )
+
+        _check_nan(out, "out")
         
         # This dictionary passes intermediate tensors to the aux losses.
         # Common keys are "perception_embed" and "rnn_output".

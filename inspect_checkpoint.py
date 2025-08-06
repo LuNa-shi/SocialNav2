@@ -28,7 +28,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         file_path = sys.argv[1]
     else:
-        file_path = '/root/swx/track2/Falcon/pretrained_model/latest_730.pth'
+        file_path = '/root/swx/track2/Falcon/ckpts/resume-state84_pointnav_ada_res18.pth'
         print(f"Usage: python {sys.argv[0]} <path_to_pth_file>")
         print(f"No file path provided. Using default: {file_path}")
 
