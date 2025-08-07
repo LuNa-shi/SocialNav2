@@ -29,7 +29,7 @@ habitat:
   gym:
     obs_keys: 
       # Adapt3R required sensors
-      # - agent_0_articulated_agent_jaw_rgb         # RGB camera for Adapt3R
+      - agent_0_articulated_agent_jaw_rgb         # RGB camera for Adapt3R
       - agent_0_articulated_agent_jaw_depth       # Depth camera for Adapt3R
       # - agent_0_jaw_intrinsics  # Camera intrinsics for Adapt3R
       # - agent_0_jaw_extrinsics  # Camera extrinsics for Adapt3R
@@ -100,7 +100,7 @@ habitat_baselines:
   video_dir: "evaluation/falcon/hm3d/video"
   test_episode_count: -1
   num_environments: 8
-  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_87" # save_dir for training
+  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_86_ada" # save_dir for training
   num_updates: -1
   total_num_steps: 15000000 # exact steps 12560368
   log_interval: 10
@@ -109,7 +109,7 @@ habitat_baselines:
   # this improves performance considerably
   force_torch_single_threaded: True
   load_resume_state_config: False
-  # train_ckpt: "evaluation/falcon/hm3d/checkpoints/latest.pth" # "evaluation/falcon/hm3d/checkpoints/ckpt.000020.pth"
+  # load_from_checkpoint: ""
 
   evaluator:
     _target_: habitat_baselines.rl.ppo.falcon_evaluator.FALCONEvaluator
@@ -119,6 +119,8 @@ habitat_baselines:
     should_load_ckpt: True
 
   rl:
+    preemption:
+      save_resume_state_interval: 20
     agent:
       type: "MultiAgentAccessMgr"
       num_agent_types: 7
@@ -129,7 +131,7 @@ habitat_baselines:
     policy:
       # Adapt3R policy for the main agent
       agent_0:
-        name: "PointNavResNetPolicy"
+        name: "Adapt3RPolicy"
         action_distribution_type: "categorical"
 
       # Other agents can use fixed or different policies
@@ -178,23 +180,19 @@ habitat_baselines:
       # The PyTorch distributed backend to use
       distrib_backend: NCCL
       
-      pretrained_weights: pretrained_model/pretrained_habitat3.pth
+      pretrained_weights: /root/swx/track2/Falcon/ckpts/resume-state84_pointnav_ada_res18.pth
       # Adapt3R: No pretrained weights available
       pretrained: True
       pretrained_encoder: False  
       train_encoder: True
       # Whether to reset the critic linear layer
       reset_critic: True
-
-      # Model parameters (overridden by Adapt3R policy config)
-      backbone: resnet50  # Default, but Adapt3R uses its own backbone config
       rnn_type: LSTM       # Default, but Adapt3R uses its own RNN config  
       num_recurrent_layers: 2
-      
       # Adapt3R-specific configuration
       adapt3r:
         visual_encoder:
-          backbone_type: "resnet18"     # 使用 resnet18 更稳定，没有预训练模型
+          backbone_type: "resnet18"     # 使用 resnet18 更稳定，没有预训练模型 resnet18 resnet 50 clip
           hidden_dim: 126               # 必须能被6整除 (NeRF positional encoding)
           num_points: 256               # 点云采样数量
           do_image: True                # 使用视觉特征

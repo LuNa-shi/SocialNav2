@@ -216,24 +216,46 @@ class SingleAgentAccessMgr(AgentAccessMgr):
             #         for k, v in pretrained_state["state_dict"].items()
             #     }
             # )
-            # adapt to better reload checkpoints
-            if "oracle_humanoid_future_trajectory" in self._env_spec.observation_space.spaces:
+            state_to_load = {}
+            if 0 in pretrained_state:
+                state_to_load = pretrained_state[0]["state_dict"]
+            elif "state_dict" in pretrained_state:
+                state_to_load = pretrained_state["state_dict"]
+
+            if state_to_load:
                 model_state_dict = actor_critic.state_dict()
-                filtered_pretrained_state_dict = {k[len("actor_critic.") :]: v for k, v in pretrained_state["state_dict"].items() if k[len("actor_critic.") :] in model_state_dict and v.shape == model_state_dict[k[len("actor_critic.") :]].shape}
-                model_state_dict.update(filtered_pretrained_state_dict)
+                
+                # Check for and remove "actor_critic." prefix if present
+                has_prefix = any(k.startswith("actor_critic.") for k in state_to_load.keys())
+                if has_prefix:
+                    state_to_load = {
+                        k[len("actor_critic.") :]: v
+                        for k, v in state_to_load.items()
+                    }
+
+                filtered_state = {
+                    k: v
+                    for k, v in state_to_load.items()
+                    if k in model_state_dict and v.shape == model_state_dict[k].shape
+                }
+
+                # Record loaded and skipped layers for adaptive learning rate scheduling
+                self._loaded_layers = list(filtered_state.keys())
+                self._skipped_layers = []
+                
+                logger.info(f"Loaded {len(filtered_state)} of {len(state_to_load)} layers from pretrained model.")
+                
+                
+                for k in state_to_load:
+                    if k not in filtered_state:
+                        if k not in model_state_dict:
+                            logger.info(f"Skipping layer {k} (not in current model).")
+                        else:
+                            logger.info(f"Skipping layer {k} (shape mismatch: ckpt {state_to_load[k].shape} vs model {model_state_dict[k].shape}).")
+                            # self._skipped_layers.append(k)
+                
+                model_state_dict.update(filtered_state)
                 actor_critic.load_state_dict(model_state_dict, strict=False)
-            elif self._config.habitat_baselines.rl.auxiliary_losses:
-                model_state_dict = actor_critic.state_dict()
-                filtered_pretrained_state_dict = {k[len("actor_critic.") :]: v for k, v in pretrained_state["state_dict"].items() if k[len("actor_critic.") :] in model_state_dict and v.shape == model_state_dict[k[len("actor_critic.") :]].shape}
-                model_state_dict.update(filtered_pretrained_state_dict)
-                actor_critic.load_state_dict(model_state_dict, strict=False)
-            else:
-                actor_critic.load_state_dict(
-                        { 
-                            k[len("actor_critic.") :]: v
-                            for k, v in pretrained_state["state_dict"].items()
-                        }
-                    )
         elif self._config.habitat_baselines.rl.ddppo.pretrained_encoder:
             prefix = "actor_critic.net.visual_encoder."
             actor_critic.net.visual_encoder.load_state_dict(

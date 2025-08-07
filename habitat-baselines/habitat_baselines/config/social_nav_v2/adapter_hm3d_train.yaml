@@ -29,7 +29,7 @@ habitat:
   gym:
     obs_keys: 
       # Adapt3R required sensors
-      # - agent_0_articulated_agent_jaw_rgb         # RGB camera for Adapt3R
+      - agent_0_articulated_agent_jaw_rgb         # RGB camera for Adapt3R
       - agent_0_articulated_agent_jaw_depth       # Depth camera for Adapt3R
       # - agent_0_jaw_intrinsics  # Camera intrinsics for Adapt3R
       # - agent_0_jaw_extrinsics  # Camera extrinsics for Adapt3R
@@ -129,7 +129,7 @@ habitat_baselines:
     policy:
       # Adapt3R policy for the main agent
       agent_0:
-        name: "PointNavResNetPolicy"
+        name: "Adapt3RPolicy"
         action_distribution_type: "categorical"
 
       # Other agents can use fixed or different policies

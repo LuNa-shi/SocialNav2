@@ -124,3 +124,5 @@ habitat-baselines/habitat_baselines/config/social_nav_v2/test_only_pointnav.yaml
 habitat-lab/habitat/config/benchmark/nav/socialnav_v2/test_only_pointnav_task.yaml
 habitat-lab/habitat/config/habitat/dataset/pointnav/hm3d_fin.yaml
 0807_spot_hm3d/
+ckpts
+git_share/
