@@ -265,7 +265,6 @@ class ResNetEncoder(nn.Module):
                     obs_k.float() * self.key_needs_rescaling[k]
                 )  # normalize
             cnn_input.append(obs_k)
-
         x = torch.cat(cnn_input, dim=1)
         x = F.avg_pool2d(x, 2)
 
