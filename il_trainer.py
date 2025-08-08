@@ -12,7 +12,8 @@ import os
 import pickle
 import glob
 from typing import Dict, List, Tuple, Any
-from collections import defaultdict
+from collections import defaultdict, deque
+import time
 
 import numpy as np
 import torch
@@ -32,7 +33,7 @@ from habitat_baselines.utils.common import batch_obs
 # ===============================================================================
 
 # Dataset paths
-DATASET_ROOT = "/root/20250805_183840"
+DATASET_ROOT = "/root/zwj/Falcon/falcon_imitation_data/20250807_183821"
 RGB_DATA_DIR = os.path.join(DATASET_ROOT, "jaw_rgb_data")
 DEPTH_DATA_DIR = os.path.join(DATASET_ROOT, "jaw_depth_data") 
 OTHER_DATA_DIR = os.path.join(DATASET_ROOT, "other_data")
@@ -42,15 +43,23 @@ TOPDOWN_MAP_DIR = os.path.join(DATASET_ROOT, "topdown_map")
 HIDDEN_SIZE = 512
 RNN_TYPE = "LSTM"
 NUM_RECURRENT_LAYERS = 2
-BACKBONE = "resnet18"
+# Note: backbone will be set to "resnet50" in model initialization to match pretrained weights
 
 # Training parameters
 LEARNING_RATE = 1e-4
 BATCH_SIZE = 4
-NUM_EPOCHS = 10
-SEQUENCE_LENGTH = 50  # Number of timesteps per sequence
+NUM_EPOCHS = 50
+SEQUENCE_LENGTH = 30  # Number of timesteps per sequence (set to fit shortest episodes)
 MAX_GRAD_NORM = 0.2
 WEIGHT_DECAY = 1e-6
+
+# Distributed training (DDP) switches
+USE_DDP = True                 # Enable DistributedDataParallel
+DDP_BACKEND = "nccl"           # Backend: nccl/gloo (nccl for GPUs)
+DDP_FP16 = False               # Optional: enable torch.cuda.amp autocast
+DDP_FIND_UNUSED = False        # Set True if graph has unused params
+DDP_BROADCAST_BUFFERS = False  # Avoid broadcasting running stats buffers
+DDP_INIT_METHOD = "env://"     # Use environment variables for init
 
 # Action space parameters
 NUM_ACTIONS = 4  # [0: STOP, 1: MOVE_FORWARD, 2: TURN_LEFT, 3: TURN_RIGHT]
@@ -60,6 +69,10 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Output paths
 MODEL_SAVE_PATH = "il_model_final.pth"
+CHECKPOINT_DIR = "outputs"
+SAVE_BEST = True                  # Save best checkpoint instead of only last
+SAVE_BEST_BY = "train_accuracy"       # train_loss or train_accuracy
+SAVE_LAST = True                  # Also save last epoch model
 LOG_INTERVAL = 10  # Print training progress every N batches
 
 print(f"Configuration loaded. Using device: {DEVICE}")
@@ -77,18 +90,12 @@ def get_observation_spaces():
     This matches the SocialNav2 dataset format.
     """
     observation_space = spaces.Dict({
-        'agent_0_articulated_agent_jaw_rgb': spaces.Box(
-            low=0, high=255, shape=(240, 228, 3), dtype=np.uint8
-        ),
+        # Only use depth input - remove RGB for simplicity
         'agent_0_articulated_agent_jaw_depth': spaces.Box(
-            low=0.0, high=10.0, shape=(240, 228, 1), dtype=np.float32  # Resized to match RGB
+            low=0.0, high=10.0, shape=(240, 228, 1), dtype=np.float32
         ),
-        # Temporarily removed top_down_map due to inconsistent sizes across episodes
-        # 'top_down_map': spaces.Box(
-        #     low=0, high=255, shape=(256, 303), dtype=np.uint8
-        # ),
-        # Placeholder for GPS compass - will be filled when data is ready
-        'agent_0_pointgoal_with_gps_compass': spaces.Box(
+        # Use standard Habitat GPS compass sensor key to enable automatic processing
+        'pointgoal_with_gps_compass': spaces.Box(
             low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32
         ),
     })
@@ -118,19 +125,21 @@ class ImitationLearningPolicy(nn.Module):
         self.action_space = action_space
         
         # Initialize the core PointNavResNetNet
+        # Use ResNet50 BottleNeck architecture to match Habitat pretrained weights
         self.core_network = PointNavResNetNet(
             observation_space=observation_space,
-            action_space=action_space,  # for previous action embedding
+            action_space=action_space,  # keep original action space (4), prev_action_embedding will be resized by checkpoint if aligned
             hidden_size=HIDDEN_SIZE,
             num_recurrent_layers=NUM_RECURRENT_LAYERS,
             rnn_type=RNN_TYPE,
-            backbone=BACKBONE,
-            resnet_baseplanes=32,  # Standard value for ResNet18
+            backbone="resnet50",  # Use ResNet50 BottleNeck architecture
+            resnet_baseplanes=32,  # Match Habitat pretrained weights baseplanes
             normalize_visual_inputs=True,
             fuse_keys=None,
             force_blind_policy=False,
             discrete_actions=True,
         )
+
         
         # Action head - single linear layer for action prediction
         # This replaces the CategoricalNet used in RL framework
@@ -212,25 +221,13 @@ class ImitationLearningPolicy(nn.Module):
     
     def _load_mixed_pretrained_weights(self):
         """
-        Load mixed pretrained weights:
-        1. RGB backbone: ImageNet pretrained weights
-        2. Other components: Habitat pretrained weights
+        Load Habitat pretrained weights only (simplified approach).
+        Using depth-only input for simplicity.
         """
-        print("\n=== Loading Mixed Pretrained Weights ===")
+        print("\n=== Loading Habitat Pretrained Weights ===")
         
-        # 1. Load ImageNet pretrained weights for RGB backbone
-        print("1. Loading ImageNet pretrained weights for RGB backbone...")
-        try:
-            import torchvision.models as models
-            imagenet_resnet = models.resnet18(pretrained=True)
-            imagenet_state_dict = imagenet_resnet.state_dict()
-            print(f"   ✓ Loaded ImageNet ResNet18 weights ({len(imagenet_state_dict)} keys)")
-        except Exception as e:
-            print(f"   ✗ Failed to load ImageNet weights: {e}")
-            imagenet_state_dict = {}
-        
-        # 2. Load Habitat pretrained weights
-        print("2. Loading Habitat pretrained weights...")
+        # Load Habitat pretrained weights
+        print("1. Loading Habitat pretrained weights...")
         habitat_path = "/root/zjm/SocialNav2/pretrained_model/pretrained_habitat3.pth"
         try:
             habitat_checkpoint = torch.load(habitat_path, map_location='cpu')
@@ -239,62 +236,88 @@ class ImitationLearningPolicy(nn.Module):
             else:
                 habitat_state_dict = habitat_checkpoint
             print(f"   ✓ Loaded Habitat weights ({len(habitat_state_dict)} keys)")
+            
+            # Debug: Show first few habitat keys
+            print("   Debug - First 10 Habitat keys:")
+            for i, key in enumerate(list(habitat_state_dict.keys())[:10]):
+                print(f"     {i+1}. {key}")
+                
         except Exception as e:
             print(f"   ✗ Failed to load Habitat weights: {e}")
             habitat_state_dict = {}
+            return
         
-        # 3. Create unified weight dictionary
-        print("3. Creating unified weight dictionary...")
+        # Create unified weight dictionary
+        print("2. Creating unified weight dictionary...")
         unified_state_dict = {}
         
         # Get current model's state dict for reference
         current_state_dict = self.state_dict()
         
         # Track loading statistics
-        loaded_from_imagenet = 0
         loaded_from_habitat = 0
         not_loaded = 0
         
         for key in current_state_dict.keys():
             loaded = False
             
-            # Try to load RGB backbone weights from ImageNet
-            if 'visual_encoder' in key and 'rgb' in key.lower():
-                # Map habitat-baselines ResNet keys to torchvision ResNet keys
-                imagenet_key = self._map_habitat_to_imagenet_key(key)
-                if imagenet_key and imagenet_key in imagenet_state_dict:
-                    unified_state_dict[key] = imagenet_state_dict[imagenet_key]
-                    loaded_from_imagenet += 1
-                    loaded = True
-            
-            # Try to load from Habitat weights (if not loaded from ImageNet)
-            if not loaded:
-                # Try direct key match first
-                if key in habitat_state_dict:
-                    unified_state_dict[key] = habitat_state_dict[key]
+            # Try direct key match first
+            if key in habitat_state_dict:
+                unified_state_dict[key] = habitat_state_dict[key]
+                loaded_from_habitat += 1
+                loaded = True
+                print(f"   Direct match: {key}")
+            else:
+                # Try with Habitat prefix mapping
+                # Our model: core_network.xxx -> Habitat: actor_critic.net.xxx
+                habitat_key = key.replace('core_network.', 'actor_critic.net.')
+                if habitat_key in habitat_state_dict:
+                    unified_state_dict[key] = habitat_state_dict[habitat_key]
                     loaded_from_habitat += 1
                     loaded = True
+                    print(f"   Habitat match: {key} <- {habitat_key}")
                 else:
-                    # Try with different prefixes (e.g., 'actor_critic.net.' prefix)
-                    for prefix in ['actor_critic.net.', 'net.', 'policy.']:
-                        habitat_key = prefix + key
-                        if habitat_key in habitat_state_dict:
-                            unified_state_dict[key] = habitat_state_dict[habitat_key]
+                    # Try other common prefixes as fallback
+                    for prefix in ['net.', 'policy.']:
+                        fallback_key = prefix + key.replace('core_network.', '')
+                        if fallback_key in habitat_state_dict:
+                            unified_state_dict[key] = habitat_state_dict[fallback_key]
                             loaded_from_habitat += 1
                             loaded = True
+                            print(f"   Fallback match: {key} <- {fallback_key}")
                             break
             
             if not loaded:
                 not_loaded += 1
+                print(f"   Not found: {key}")
         
-        # 4. Load the unified weights with strict=False
-        print("4. Loading unified weights into model...")
-        missing_keys, unexpected_keys = self.load_state_dict(unified_state_dict, strict=False)
+        # Explicitly map action head from RL checkpoint (better warm start)
+        ah_w = 'action_head.weight'
+        ah_b = 'action_head.bias'
+        rl_w = 'actor_critic.action_distribution.linear.weight'
+        rl_b = 'actor_critic.action_distribution.linear.bias'
+        if rl_w in habitat_state_dict and rl_b in habitat_state_dict:
+            unified_state_dict[ah_w] = habitat_state_dict[rl_w]
+            unified_state_dict[ah_b] = habitat_state_dict[rl_b]
+            print(f"   Map action head: {ah_w} <- {rl_w}")
+            print(f"   Map action head: {ah_b} <- {rl_b}")
+        else:
+            print("   RL action head not found in checkpoint; keep IL head init")
         
-        # 5. Print loading report
+        
+        # Load the unified weights with strict=True to ensure complete matching
+        print("3. Loading unified weights into model...")
+        try:
+            missing_keys, unexpected_keys = self.load_state_dict(unified_state_dict, strict=True)
+            print("   ✓ All weights loaded successfully with strict=True")
+        except RuntimeError as e:
+            print(f"   ✗ Strict loading failed: {e}")
+            print("   → Falling back to strict=False for debugging...")
+            missing_keys, unexpected_keys = self.load_state_dict(unified_state_dict, strict=False)
+        
+        # Print loading report
         print("\n=== Weight Loading Report ===")
         print(f"Total model parameters: {len(current_state_dict)}")
-        print(f"Loaded from ImageNet: {loaded_from_imagenet}")
         print(f"Loaded from Habitat: {loaded_from_habitat}")
         print(f"Not loaded (using default init): {not_loaded}")
         
@@ -312,41 +335,9 @@ class ImitationLearningPolicy(nn.Module):
             if len(unexpected_keys) > 10:
                 print(f"  ... and {len(unexpected_keys) - 10} more")
         
-        print("=== Mixed Weight Loading Complete ===\n")
+        print("=== Habitat Weight Loading Complete ===\n")
     
-    def _map_habitat_to_imagenet_key(self, habitat_key: str) -> str:
-        """
-        Map habitat-baselines ResNet key to torchvision ResNet key.
-        
-        Example mappings:
-        'core_network.visual_encoder.rgb_encoder.backbone.layer1.0.conv1.weight' 
-        -> 'layer1.0.conv1.weight'
-        """
-        # Remove habitat-specific prefixes
-        key = habitat_key
-        prefixes_to_remove = [
-            'core_network.visual_encoder.rgb_encoder.backbone.',
-            'core_network.visual_encoder.backbone.',
-            'visual_encoder.rgb_encoder.backbone.',
-            'visual_encoder.backbone.',
-            'backbone.',
-        ]
-        
-        for prefix in prefixes_to_remove:
-            if key.startswith(prefix):
-                key = key[len(prefix):]
-                break
-        
-        # Skip certain layers that don't exist in torchvision ResNet
-        skip_patterns = ['final_layer', 'compression', 'running_mean_and_var']
-        for pattern in skip_patterns:
-            if pattern in key:
-                return None
-        
-        # Map specific layer names if needed
-        # (torchvision ResNet18 structure should mostly match)
-        
-        return key if key else None 
+ 
 
 
 # ===============================================================================
@@ -463,8 +454,7 @@ class SocialNav2Dataset(Dataset):
         """
         episode_name, start_idx = self.valid_sequences[idx]
         
-        # Load all data for this episode
-        rgb_data = self._load_rgb_data(episode_name)
+        # Load all data for this episode (RGB removed for simplicity)
         depth_data = self._load_depth_data(episode_name)
         other_data = self._load_other_data(episode_name)
         # topdown_data = self._load_topdown_data(episode_name)  # Temporarily disabled
@@ -472,14 +462,10 @@ class SocialNav2Dataset(Dataset):
         # Extract sequence
         end_idx = start_idx + self.sequence_length
         
-        # RGB observations: Keep as (seq_len, H, W, C) for ResNetEncoder
-        rgb_seq = rgb_data[start_idx:end_idx]  # (seq_len, 240, 228, 3)
-        rgb_seq = torch.from_numpy(rgb_seq).float()  # Keep original [0,255] range for RL framework
-        
-        # Depth observations: Keep as (seq_len, H, W, C) and resize to match RGB
+        # Depth observations: Keep as (seq_len, H, W, C), resize to target size
         depth_seq = depth_data[start_idx:end_idx]  # (seq_len, 256, 256, 1)
         depth_seq = torch.from_numpy(depth_seq).float()
-        # Resize depth to match RGB size: (256, 256) -> (240, 228)
+        # Resize depth to target size: (256, 256) -> (240, 228)
         depth_seq = torch.nn.functional.interpolate(
             depth_seq.permute(0, 3, 1, 2),  # Temp permute for interpolate
             size=(240, 228), 
@@ -491,11 +477,19 @@ class SocialNav2Dataset(Dataset):
         # topdown_seq = topdown_data[start_idx:end_idx]  # (seq_len, 256, 303)
         # topdown_seq = torch.from_numpy(topdown_seq).float()  # Keep original range for consistency
         
-        # GPS compass placeholder (will be filled when data is ready)
-        gps_compass_seq = torch.zeros(self.sequence_length, 2, dtype=torch.float32)
+        # GPS compass: load from other_data if available; otherwise zeros
+        if 'agent_0_pointgoal_with_gps_compass' in other_data:
+            gps_arr = other_data['agent_0_pointgoal_with_gps_compass'][start_idx:end_idx]
+            gps_compass_seq = torch.from_numpy(gps_arr).float()
+        else:
+            gps_compass_seq = torch.zeros(self.sequence_length, 2, dtype=torch.float32)
         
         # Actions: Use raw actions [0,1,2,3] directly for CrossEntropyLoss
         raw_actions = other_data['actions'][start_idx:end_idx].squeeze(-1)
+        
+        # If actions in new dataset are [1,2,3], shift to [0,1,2]
+        if raw_actions.min() >= 1 and raw_actions.max() <= 3:
+            raw_actions = raw_actions - 1
         
         # Debug: Check action value range
         unique_actions = np.unique(raw_actions)
@@ -518,12 +512,10 @@ class SocialNav2Dataset(Dataset):
         masks_seq = other_data['masks'][start_idx:end_idx]
         masks_seq = torch.from_numpy(masks_seq).bool()  # Convert to boolean for torch.where
         
-        # Build observations dictionary
+        # Build observations dictionary (RGB removed for simplicity)
         observations = {
-            'agent_0_articulated_agent_jaw_rgb': rgb_seq,
             'agent_0_articulated_agent_jaw_depth': depth_seq,
-            # 'top_down_map': topdown_seq,  # Temporarily disabled
-            'agent_0_pointgoal_with_gps_compass': gps_compass_seq,
+            'pointgoal_with_gps_compass': gps_compass_seq,
         }
         
         return {
@@ -574,14 +566,27 @@ def create_dataloader(dataset_root: str, batch_size: int = BATCH_SIZE) -> DataLo
     """
     dataset = SocialNav2Dataset(dataset_root, SEQUENCE_LENGTH)
     
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,  # Adjust based on your system
-        pin_memory=True if torch.cuda.is_available() else False,
-        drop_last=True  # Ensure consistent batch sizes
-    )
+    # If DDP, use DistributedSampler and disable shuffle in DataLoader
+    if USE_DDP and torch.cuda.is_available() and torch.distributed.is_initialized():
+        sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True,
+            drop_last=True,
+            sampler=sampler,
+        )
+    else:
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=2,  # Adjust based on your system
+            pin_memory=True if torch.cuda.is_available() else False,
+            drop_last=True  # Ensure consistent batch sizes
+        )
     
     print(f"DataLoader created: batch_size={batch_size}, num_workers=2")
     return dataloader
@@ -590,6 +595,7 @@ def create_dataloader(dataset_root: str, batch_size: int = BATCH_SIZE) -> DataLo
 # ===============================================================================
 # TRAINING FUNCTION
 # ===============================================================================
+
 
 def train():
     """
@@ -606,210 +612,212 @@ def train():
     print("=" * 80)
     
     # -------------------------------------------------------------------------
+    # 0. (Optional) Initialize distributed training
+    # -------------------------------------------------------------------------
+    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    is_ddp = USE_DDP and torch.cuda.is_available() and world_size > 1
+    if is_ddp:
+        torch.cuda.set_device(local_rank % torch.cuda.device_count())
+        torch.distributed.init_process_group(backend=DDP_BACKEND, init_method=DDP_INIT_METHOD)
+        is_main_process = (torch.distributed.get_rank() == 0)
+    else:
+        is_main_process = True
+    
+    # -------------------------------------------------------------------------
     # 1. Setup: Device, Spaces, Dataset, and Model
     # -------------------------------------------------------------------------
     
-    print(f"\n1. Setting up training environment...")
-    print(f"Device: {DEVICE}")
-    print(f"Dataset root: {DATASET_ROOT}")
+    if is_main_process:
+        print(f"\n1. Setting up training environment...")
+        print(f"Device: {DEVICE}")
+        print(f"Dataset root: {DATASET_ROOT}")
     
     # Create observation and action spaces
     observation_space, action_space = get_observation_spaces()
-    print(f"Observation space keys: {list(observation_space.spaces.keys())}")
-    print(f"Action space: {action_space}")
+    if is_main_process:
+        print(f"Observation space keys: {list(observation_space.spaces.keys())}")
+        print(f"Action space: {action_space}")
     
     # Create dataset and dataloader
     dataloader = create_dataloader(DATASET_ROOT, BATCH_SIZE)
-    print(f"Training data ready: {len(dataloader)} batches per epoch")
+    if is_main_process:
+        print(f"Training data ready: {len(dataloader)} batches per epoch")
     
     # Initialize the model
-    model = ImitationLearningPolicy(observation_space, action_space)
-    model = model.to(DEVICE)
+    model = ImitationLearningPolicy(observation_space, action_space).to(DEVICE)
     
-    # Count total parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {trainable_params:,} trainable / {total_params:,} total")
+    # Wrap with DDP if enabled
+    if is_ddp:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank % torch.cuda.device_count()],
+            output_device=local_rank % torch.cuda.device_count(),
+            find_unused_parameters=DDP_FIND_UNUSED,
+            broadcast_buffers=DDP_BROADCAST_BUFFERS,
+        )
+    
+    # Count total parameters (only main process)
+    if is_main_process:
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Model parameters: {trainable_params:,} trainable / {total_params:,} total")
     
     # -------------------------------------------------------------------------
     # 2. Optimizer and Loss Function
     # -------------------------------------------------------------------------
     
-    print(f"\n2. Setting up optimizer and loss function...")
+    if is_main_process:
+        print(f"\n2. Setting up optimizer and loss function...")
     
-    # AdamW optimizer with weight decay
     optimizer = optim.AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         eps=1e-8
     )
-    
-    # Cross-entropy loss for action classification
     criterion = nn.CrossEntropyLoss(reduction='mean')
+    if is_main_process:
+        print(f"Optimizer: AdamW (lr={LEARNING_RATE}, weight_decay={WEIGHT_DECAY})")
+        print(f"Loss function: CrossEntropyLoss")
+        print(f"Gradient clipping: max_norm={MAX_GRAD_NORM}")
     
-    print(f"Optimizer: AdamW (lr={LEARNING_RATE}, weight_decay={WEIGHT_DECAY})")
-    print(f"Loss function: CrossEntropyLoss")
-    print(f"Gradient clipping: max_norm={MAX_GRAD_NORM}")
+    scaler = torch.cuda.amp.GradScaler(enabled=DDP_FP16)
     
     # -------------------------------------------------------------------------
     # 3. Training Loop
     # -------------------------------------------------------------------------
     
-    print(f"\n3. Starting training loop...")
-    print(f"Epochs: {NUM_EPOCHS}, Batch size: {BATCH_SIZE}, Sequence length: {SEQUENCE_LENGTH}")
-    print("-" * 80)
+    if is_main_process:
+        print(f"\n3. Starting training loop...")
+        print(f"Epochs: {NUM_EPOCHS}, Batch size: {BATCH_SIZE}, Sequence length: {SEQUENCE_LENGTH}")
+        print("-" * 80)
+    
+    if is_ddp and hasattr(dataloader, 'sampler') and isinstance(dataloader.sampler, torch.utils.data.distributed.DistributedSampler):
+        dataloader.sampler.set_epoch(0)
     
     model.train()
-    global_step = 0
+    global_iter = 0
+    t_start = time.time()
+    loss_window = deque(maxlen=50)
+    acc_window = deque(maxlen=50)
     
     for epoch in range(NUM_EPOCHS):
+        if is_ddp and hasattr(dataloader, 'sampler') and isinstance(dataloader.sampler, torch.utils.data.distributed.DistributedSampler):
+            dataloader.sampler.set_epoch(epoch)
+        
         epoch_loss = 0.0
         epoch_accuracy = 0.0
         num_batches = 0
         
         for batch_idx, batch_data in enumerate(dataloader):
-            # Move batch to device
-            observations = {}
-            for key, value in batch_data['observations'].items():
-                observations[key] = value.to(DEVICE)  # (batch_size, seq_len, ...)
-            
-            actions = batch_data['actions'].to(DEVICE)  # (batch_size, seq_len)
-            masks = batch_data['masks'].to(DEVICE)      # (batch_size, seq_len)
-            
+            observations = {k: v.to(DEVICE) for k, v in batch_data['observations'].items()}
+            actions = batch_data['actions'].to(DEVICE)
+            masks = batch_data['masks'].to(DEVICE)
             batch_size, seq_len = actions.shape
             
-            # ----------------------------------------------------------------
-            # RNN State Management and Sequence Processing
-            # ----------------------------------------------------------------
-            
-            # Initialize RNN hidden states for this batch
-            rnn_hidden_states = model.get_initial_hidden_state(batch_size)
-            
-            # Initialize previous actions (start with action 0)
+            rnn_hidden_states = model.module.get_initial_hidden_state(batch_size) if is_ddp else model.get_initial_hidden_state(batch_size)
             prev_actions = torch.zeros(batch_size, dtype=torch.long, device=DEVICE)
-            
-            # Accumulate loss over the entire sequence
             total_loss = 0.0
             correct_predictions = 0
             total_predictions = 0
             
-            # Process each timestep in the sequence
             for t in range(seq_len):
-                # Prepare observations for current timestep
-                current_obs = {}
-                for key, value in observations.items():
-                    current_obs[key] = value[:, t]  # (batch_size, ...)
+                current_obs = {k: v[:, t] for k, v in observations.items()}
+                current_actions = actions[:, t]
+                # Use boolean (B,1) masks to satisfy prev_action embedding (torch.where expects bool)
+                # and also keep single-step RNN path
+                current_masks = masks[:, t].bool()
                 
-                # Get current actions and masks
-                current_actions = actions[:, t]  # (batch_size,)
-                current_masks = masks[:, t]      # (batch_size,)
+                with torch.cuda.amp.autocast(enabled=DDP_FP16):
+                    action_logits, rnn_hidden_states = (model.module if is_ddp else model)(
+                        observations=current_obs,
+                        rnn_hidden_states=rnn_hidden_states,
+                        prev_actions=prev_actions,
+                        masks=current_masks,
+                    )
+                    step_loss = criterion(action_logits, current_actions)
                 
-                # Forward pass through the model
-                action_logits, rnn_hidden_states = model(
-                    observations=current_obs,
-                    rnn_hidden_states=rnn_hidden_states,
-                    prev_actions=prev_actions,
-                    masks=current_masks
-                )
-                
-                # Compute loss for current timestep
-                step_loss = criterion(action_logits, current_actions)
                 total_loss += step_loss
-                
-                # Compute accuracy for current timestep
                 predicted_actions = torch.argmax(action_logits, dim=1)
                 correct_predictions += (predicted_actions == current_actions).sum().item()
                 total_predictions += batch_size
-                
-                # Update previous actions for next timestep
-                # Use ground truth actions for teacher forcing
                 prev_actions = current_actions
-                
-                # Handle episode boundaries: reset hidden states where mask is 0
-                # Note: This is handled automatically by the RNN through masks
-                
-            # Average loss over sequence length
+            
             avg_loss = total_loss / seq_len
-            
-            # ----------------------------------------------------------------
-            # Backpropagation and Optimization
-            # ----------------------------------------------------------------
-            
-            # Zero gradients
             optimizer.zero_grad()
+            scaler.scale(avg_loss).backward() if DDP_FP16 else avg_loss.backward()
             
-            # Backward pass
-            avg_loss.backward()
+            # Unscale grads for AMP before clipping and compute grad norm
+            if DDP_FP16:
+                scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            scaler.step(optimizer) if DDP_FP16 else optimizer.step()
+            if DDP_FP16:
+                scaler.update()
             
-            # Optimizer step
-            optimizer.step()
-            
-            # ----------------------------------------------------------------
-            # Logging and Statistics
-            # ----------------------------------------------------------------
+            # Learning rate (assume single param group)
+            cur_lr = optimizer.param_groups[0]["lr"]
             
             batch_loss = avg_loss.item()
             batch_accuracy = correct_predictions / total_predictions
-            
             epoch_loss += batch_loss
             epoch_accuracy += batch_accuracy
             num_batches += 1
-            global_step += 1
+            global_iter += 1
+            loss_window.append(batch_loss)
+            acc_window.append(batch_accuracy)
             
-            # Print progress every LOG_INTERVAL batches
-            if (batch_idx + 1) % LOG_INTERVAL == 0:
-                print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] "
-                      f"Batch [{batch_idx+1}/{len(dataloader)}] "
-                      f"Loss: {batch_loss:.4f} "
-                      f"Acc: {batch_accuracy:.4f} "
-                      f"Step: {global_step}")
+            if is_main_process and (batch_idx + 1) % LOG_INTERVAL == 0:
+                elapsed = time.time() - t_start
+                it_per_sec = global_iter / max(1e-6, elapsed)
+                remaining_iters = ((NUM_EPOCHS - (epoch + 1)) * len(dataloader)) + (len(dataloader) - (batch_idx + 1))
+                eta_hours = (remaining_iters / max(1e-6, it_per_sec)) / 3600.0
+                print(
+                    f"Epoch {epoch+1}/{NUM_EPOCHS} | iter {global_iter} ({batch_idx+1}/{len(dataloader)}) | "
+                    f"loss {batch_loss:.4f} (avg {np.mean(loss_window):.4f}) | "
+                    f"acc {batch_accuracy:.4f} (avg {np.mean(acc_window):.4f}) | "
+                    f"lr {cur_lr:.2e} | grad {float(grad_norm):.2f} | "
+                    f"{it_per_sec:.2f} it/s | ETA {eta_hours:.2f}h"
+                )
         
-        # ----------------------------------------------------------------
-        # End of Epoch Statistics
-        # ----------------------------------------------------------------
+        # Compute epoch metrics
+        avg_epoch_loss = epoch_loss / max(1, num_batches)
+        avg_epoch_accuracy = epoch_accuracy / max(1, num_batches)
         
-        avg_epoch_loss = epoch_loss / num_batches
-        avg_epoch_accuracy = epoch_accuracy / num_batches
-        
-        print(f"\nEpoch [{epoch+1}/{NUM_EPOCHS}] Summary:")
-        print(f"  Average Loss: {avg_epoch_loss:.4f}")
-        print(f"  Average Accuracy: {avg_epoch_accuracy:.4f}")
-        print(f"  Total Steps: {global_step}")
-        print("-" * 80)
+        # Save best/last (main process only)
+        if is_main_process:
+            if SAVE_BEST:
+                os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+                best_path = os.path.join(CHECKPOINT_DIR, "il_model_best.pth")
+                metric = avg_epoch_loss if SAVE_BEST_BY == "train_loss" else avg_epoch_accuracy
+                better = (lambda cur, best: cur < best) if SAVE_BEST_BY == "train_loss" else (lambda cur, best: cur > best)
+                # Track best in function static attribute
+                if not hasattr(train, "_best_metric"):
+                    train._best_metric = float("inf") if SAVE_BEST_BY == "train_loss" else float("-inf")
+                if better(metric, train._best_metric):
+                    to_save = model.module if is_ddp else model
+                    torch.save(to_save.state_dict(), best_path)
+                    train._best_metric = metric
+                    print(f"[BEST] Saved new best to {best_path} (metric={metric:.4f}, by={SAVE_BEST_BY})")
+            
+            if SAVE_LAST:
+                to_save = model.module if is_ddp else model
+                torch.save(to_save.state_dict(), MODEL_SAVE_PATH)
+            
+            print(f"\nEpoch [{epoch+1}/{NUM_EPOCHS}] Summary:")
+            print(f"  Average Loss: {avg_epoch_loss:.4f}")
+            print(f"  Average Accuracy: {avg_epoch_accuracy:.4f}")
+            print(f"  Total iters: {global_iter}")
     
     # -------------------------------------------------------------------------
-    # 4. Save Final Model
+    # 4. Save the final model (only main process)
     # -------------------------------------------------------------------------
-    
-    print(f"\n4. Saving trained model...")
-    
-    # Save the model state dict
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'config': {
-            'hidden_size': HIDDEN_SIZE,
-            'rnn_type': RNN_TYPE,
-            'num_recurrent_layers': NUM_RECURRENT_LAYERS,
-            'backbone': BACKBONE,
-            'num_actions': NUM_ACTIONS,
-            'sequence_length': SEQUENCE_LENGTH,
-        },
-        'training_stats': {
-            'final_loss': avg_epoch_loss,
-            'final_accuracy': avg_epoch_accuracy,
-            'total_epochs': NUM_EPOCHS,
-            'total_steps': global_step,
-        }
-    }, MODEL_SAVE_PATH)
-    
-    print(f"Model saved to: {MODEL_SAVE_PATH}")
-    print(f"Final training loss: {avg_epoch_loss:.4f}")
-    print(f"Final training accuracy: {avg_epoch_accuracy:.4f}")
+    if is_main_process:
+        to_save = model.module if is_ddp else model
+        torch.save(to_save.state_dict(), MODEL_SAVE_PATH)
+        print(f"\nModel saved to: {MODEL_SAVE_PATH}")
     
     print("\n" + "=" * 80)
     print("Training completed successfully!")
