@@ -827,8 +827,8 @@ class PPOTrainer(BaseRLTrainer):
             ckpt_dict = self.load_checkpoint(
                 checkpoint_path, map_location="cpu", weights_only=False
             )
-            step_id = ckpt_dict["extra_state"]["step"]
-            logger.info(f"Loaded checkpoint trained for {step_id} steps")
+            # step_id = ckpt_dict["extra_state"]["step"]
+            # clogger.info(f"Loaded checkpoint trained for {step_id} steps")
         else:
             ckpt_dict = {"config": None}
 

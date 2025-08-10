@@ -210,6 +210,7 @@ class SingleAgentAccessMgr(AgentAccessMgr):
 
         # adapt to multi-agent setup
         if self._config.habitat_baselines.rl.ddppo.pretrained and (self.agent_name == "agent_0" or self.agent_name == "main_agent") : 
+            logger.info(f"Loading pretrained weights for agent {self.agent_name}")
             # actor_critic.load_state_dict(
             #     {  # type: ignore
             #         k[len("actor_critic.") :]: v
@@ -221,10 +222,24 @@ class SingleAgentAccessMgr(AgentAccessMgr):
                 state_to_load = pretrained_state[0]["state_dict"]
             elif "state_dict" in pretrained_state:
                 state_to_load = pretrained_state["state_dict"]
+            else:
+                state_to_load = pretrained_state
 
             if state_to_load:
+                logger.info(f"Loading state_to_load: {state_to_load.keys()}")
                 model_state_dict = actor_critic.state_dict()
-                
+
+                has_core_net_prefix = any(k.startswith("core_network.") for k in state_to_load.keys())
+                # If the checkpoint keys use "core_network." as a prefix, replace it with "net."
+                if has_core_net_prefix:
+                    new_state_to_load = {}
+                    for k, v in state_to_load.items():
+                        if k.startswith("core_network."):
+                            new_key = "net." + k[len("core_network.") :]
+                            new_state_to_load[new_key] = v
+                        else:
+                            new_state_to_load[k] = v
+                    state_to_load = new_state_to_load
                 # Check for and remove "actor_critic." prefix if present
                 has_prefix = any(k.startswith("actor_critic.") for k in state_to_load.keys())
                 if has_prefix:
@@ -256,6 +271,9 @@ class SingleAgentAccessMgr(AgentAccessMgr):
                 
                 model_state_dict.update(filtered_state)
                 actor_critic.load_state_dict(model_state_dict, strict=False)
+
+
+
         elif self._config.habitat_baselines.rl.ddppo.pretrained_encoder:
             prefix = "actor_critic.net.visual_encoder."
             actor_critic.net.visual_encoder.load_state_dict(
@@ -314,7 +332,25 @@ class SingleAgentAccessMgr(AgentAccessMgr):
         self._actor_critic.load_state_dict(ckpt["state_dict"])
 
     def load_state_dict(self, state: Dict) -> None:
-        self._actor_critic.load_state_dict(state["state_dict"])
+        if "state_dict" in state:
+            self._actor_critic.load_state_dict(state["state_dict"])
+        else:
+            has_core_net_prefix = any(k.startswith("core_network.") for k in state.keys())
+                # If the checkpoint keys use "core_network." as a prefix, replace it with "net."
+            if has_core_net_prefix:
+                new_state_to_load = {}
+                for k, v in state.items():
+                    if k.startswith("core_network."):
+                        new_key = "net." + k[len("core_network.") :]
+                        new_state_to_load[new_key] = v
+                    elif k == "action_head.weight":
+                        new_state_to_load["action_distribution.linear.weight"] = v
+                    elif k == "action_head.bias":
+                        new_state_to_load["action_distribution.linear.bias"] = v
+                    else:
+                        new_state_to_load[k] = v
+                state = new_state_to_load
+            self._actor_critic.load_state_dict(state, strict=False)
         if self._updater is not None:
             self._updater.load_state_dict(state)
             if "lr_sched_state" in state:

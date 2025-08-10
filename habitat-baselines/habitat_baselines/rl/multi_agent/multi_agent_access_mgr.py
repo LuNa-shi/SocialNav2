@@ -337,8 +337,12 @@ class MultiAgentAccessMgr(AgentAccessMgr):
         for agent_i, agent in enumerate(self._agents):
             if not agent.actor_critic.should_load_agent_state:
                 continue
-            agent.load_state_dict(state[str(agent_i)]) # strange setup
-            # agent.load_state_dict(state[agent_i])
+            if str(agent_i) in state.keys():
+                agent.load_state_dict(state[str(agent_i)]) # strange setup
+            elif agent_i in state.keys():
+                agent.load_state_dict(state[agent_i])
+            else:
+                agent.load_state_dict(state)
 
     def load_ckpt_state_dict(self, ckpt):
         for agent in self._agents:

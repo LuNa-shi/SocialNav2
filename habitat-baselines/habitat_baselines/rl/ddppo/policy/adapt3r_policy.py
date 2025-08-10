@@ -20,6 +20,8 @@
 # 5. Habitat Policy: Adapt3RPolicy
 # ---------------------------------------------------------------------------- #
 
+import math
+import os
 import einops
 import torch
 import torch.nn as nn
@@ -35,6 +37,13 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from gym import spaces
 from torch import Tensor
 from omegaconf import OmegaConf
+
+try:
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+except ImportError:
+    plt = None
+    Axes3D = None
 
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ppo.policy import Net, NetPolicy
@@ -92,8 +101,8 @@ class PointCloudUtils:
         pos_x = pos_x.expand(B, ncam, -1, -1)
         pos_y = pos_y.expand(B, ncam, -1, -1)
 
-        x_coords = (pos_x - cx) * depth / fx
-        y_coords = (pos_y - cy) * depth / fy
+        x_coords = (pos_x - cx) * depth / (fx + 1e-8)
+        y_coords = (pos_y - cy) * depth / (fy + 1e-8)
         
         pcd_cam = torch.stack([x_coords, y_coords, depth], dim=-1)
         return einops.rearrange(pcd_cam, 'b ncam h w c -> b ncam (h w) c')
@@ -149,6 +158,11 @@ class EnvUtils:
                 # The camera name is the part before '_rgb'
                 cam_name = parts[-2]
                 cam_names.add(cam_name)
+
+        if not cam_names:
+            cam_names = ['default']
+            return sorted(list(cam_names))
+        
         return sorted(list(cam_names))
 
     @staticmethod
@@ -161,6 +175,8 @@ class EnvUtils:
         # Heuristic: if name is 'jaw' or 'arm', it's part of articulated agent
         if name in ["jaw", "arm"]:
             return f"articulated_agent_{name}_rgb"
+        elif name == 'default':
+            return 'rgb'
         else:
             return f"{name}_rgb" # For keys like 'head_rgb'
 
@@ -173,6 +189,8 @@ class EnvUtils:
         """
         if name in ["jaw", "arm"]:
             return f"articulated_agent_{name}_depth"
+        elif name == 'default':
+            return 'depth'
         else:
             return f"{name}_depth"
         
@@ -215,6 +233,11 @@ class PositionalEncodings:
             emb = x.unsqueeze(-1) * freq_bands.view(1, 1, 1, -1)
             emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
             return einops.rearrange(emb, '... i j -> ... (i j)')
+
+def _check_nan(tensor: torch.Tensor, name: str):
+    """Checks a tensor for NaN or Inf values and prints a debug message."""
+    if not torch.isfinite(tensor).all():
+        print(f"NaN or Inf detected in '{name}' | Shape: {tensor.shape} | Contains NaN: {torch.isnan(tensor).any()} | Contains Inf: {torch.isinf(tensor).any()}")
 
 def weight_init(m):
     # Skip initialization for CLIP models to preserve pretrained weights
@@ -285,38 +308,76 @@ def load_resnet_features(name: str, pretrained: bool = True):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     return model, normalize
 
+class ModifiedResNetFeatures(ModifiedResNet):
+    """
+    A CLIP ResNet backbone modified to return intermediate layer features.
+    The __init__ method is inherited from the original ModifiedResNet.
+    """
+    def forward(self, x: torch.Tensor):
+        # Ensure input tensor has the same data type as the model's weights
+        x = x.type(self.conv1.weight.dtype)
+
+        # Pass through the ResNet stem
+        x = self.relu1(self.bn1(self.conv1(x)))
+        x = self.relu2(self.bn2(self.conv2(x)))
+        x = self.relu3(self.bn3(self.conv3(x)))
+        x = self.avgpool(x)
+
+        # Pass through the main layers
+        x0 = self.layer1(x)
+        x1 = self.layer2(x0)
+        x2 = self.layer3(x1)
+        x3 = self.layer4(x2)
+        
+        # Return a dictionary of the intermediate features
+        return {'layer1': x0, 'layer2': x1, 'layer3': x2, 'layer4': x3}
+
+
 def load_clip_features(model="RN50"):
+    """
+    Loads a CLIP visual backbone modified to return intermediate features.
+
+    Args:
+        model (str): The ResNet-based CLIP model to load (e.g., "RN50").
+
+    Returns:
+        A tuple of (backbone, normalize), where 'backbone' is the modified
+        visual model and 'normalize' is the required image normalization transform.
+    """
     if clip is None:
         raise ImportError("CLIP not installed, cannot use CLIP backbone.")
+        
+    # Load the official pre-trained model and its state dictionary
     clip_model, clip_transforms = clip.load(model)
+    state_dict = clip_model.state_dict()
     
-    class ModifiedResNetFeatures(ModifiedResNet):
-        def forward(self, x: torch.Tensor):
-            def stem(x):
-                x = self.relu1(self.bn1(self.conv1(x)))
-                x = self.relu2(self.bn2(self.conv2(x)))
-                x = self.relu3(self.bn3(self.conv3(x)))
-                x = self.avgpool(x)
-                return x
-            x = x.type(self.conv1.weight.dtype)
-            x = stem(x)
-            x0 = self.layer1(x)
-            x1 = self.layer2(x0)
-            x2 = self.layer3(x1)
-            x3 = self.layer4(x2)
-            return {'layer1': x0, 'layer2': x1, 'layer3': x2, 'layer4': x3}
-
-    clip_model.visual.__class__ = ModifiedResNetFeatures
+    # Dynamically determine the architecture from the loaded model
+    layers = tuple(
+        len(set(k.split(".")[2] for k in state_dict if k.startswith(f"visual.layer{b}")))
+        for b in [1, 2, 3, 4]
+    )
+    output_dim = state_dict["text_projection"].shape[1]
+    heads = state_dict["visual.layer1.0.conv1.weight"].shape[0] * 32 // 64
+    
+    # 1. Instantiate our custom model with the correct architecture
+    backbone = ModifiedResNetFeatures(layers, output_dim, heads)
+    
+    # 2. Load the pre-trained weights from the original model
+    backbone.load_state_dict(clip_model.visual.state_dict())
+    
+    # 3. Get the corresponding normalization function
     normalize = clip_transforms.transforms[-1]
-    return clip_model.visual, normalize
+    
+    return backbone, normalize
 
 class PointCloudBaseEncoder(nn.Module):
-    def __init__(self, observation_space, num_points, lowdim_obs_keys, do_crop=True, boundaries=None):
+    def __init__(self, observation_space, num_points, lowdim_obs_keys, do_crop=True, boundaries=None, downsample_mode='pos'):
         super().__init__()
         self.observation_space = observation_space
         self.num_points = num_points
         self.lowdim_obs_keys = lowdim_obs_keys if lowdim_obs_keys else []
         self.do_crop = do_crop
+        self.downsample_mode = downsample_mode
 
         print(f"observation_space: {observation_space}")
         print(f"lowdim_obs_keys: {self.lowdim_obs_keys}")
@@ -351,12 +412,25 @@ class PointCloudBaseEncoder(nn.Module):
             else:
                 # Create default intrinsics based on depth image size
                 B, C, H, W = depth_tensor.shape
-                default_intrinsics = torch.eye(3, device=depth_tensor.device).unsqueeze(0).expand(B, -1, -1)
-                default_intrinsics[:, 0, 0] = W * 0.8  # fx
-                default_intrinsics[:, 1, 1] = H * 0.8  # fy  
-                default_intrinsics[:, 0, 2] = W / 2    # cx
-                default_intrinsics[:, 1, 2] = H / 2    # cy
-                intrinsics.append(default_intrinsics)
+                assert(H==256 and W==256)
+                hfov_deg = 90.0
+                # 2. 将角度从度转换为弧度
+                hfov_rad = math.radians(hfov_deg)
+
+                fx = (W / 2.0) / math.tan(hfov_rad / 2.0)
+                
+                # 4. 创建内参矩阵
+                # 创建一个单位矩阵作为模板
+                default_intrinsics = torch.eye(3, device=depth_tensor.device, dtype=torch.float32).unsqueeze(0).expand(B, -1, -1)
+                
+                # 填充计算出的值
+                # .clone() 是一个好习惯，可以避免对 expand 后的张量进行原地修改的警告
+                cloned_intrinsics = default_intrinsics.clone()
+                cloned_intrinsics[:, 0, 0] = fx     # fx (焦距x)
+                cloned_intrinsics[:, 1, 1] = fx     # fy (焦距y, 假设像素是正方形)
+                cloned_intrinsics[:, 0, 2] = W / 2.0  # cx (主点x, 图像中心)
+                cloned_intrinsics[:, 1, 2] = H / 2.0  # cy (主点y, 图像中心)
+                intrinsics.append(cloned_intrinsics)
             
             # Get extrinsics or use identity matrix
             ext_key = EnvUtils.camera_name_to_extrinsic_key(cam_name)
@@ -380,8 +454,27 @@ class PointCloudBaseEncoder(nn.Module):
         b, n, d = pcd.shape
         
         if dgl_geo is not None:
-            # Use DGL farthest point sampling if available
-            downsample_indices = dgl_geo.farthest_point_sampler(pcd, self.num_points)
+            if self.downsample_mode == "pos":
+                # 模式1: 基于坐标 (XYZ) 进行FPS
+                downsample_indices = dgl_geo.farthest_point_sampler(pcd, self.num_points)
+                
+            elif self.downsample_mode == "feat":
+                # 模式2: 基于特征进行FPS
+                # 注意：DGL的FPS要求输入是3D坐标，我们这里用特征的前N维模拟坐标
+                # 这是一个常见的做法。原版代码截取了前30维。
+                # TODO check the rgb_features.shape[-1]
+                print('='*50)
+                print(f"rgb_features.shape[-1]: {rgb_features.shape[-1]}")
+                if rgb_features.shape[-1] >= 3:
+                     # 使用特征的前3维作为代理几何信息进行采样
+                    downsample_indices = dgl_geo.farthest_point_sampler(rgb_features[..., :3], self.num_points)
+                else:
+                    # 如果特征维度小于3，则退回到基于位置的采样
+                    print("Warning: Feature dimension is less than 3, falling back to 'pos' downsample mode.")
+                    downsample_indices = dgl_geo.farthest_point_sampler(pcd, self.num_points)
+            else:
+                 raise ValueError(f"Unknown downsample_mode: {self.downsample_mode}")
+
             downsampled_pcd = torch.gather(pcd, 1, einops.repeat(downsample_indices, "b n -> b n d", d=d))
             downsampled_feats = torch.gather(rgb_features, 1, einops.repeat(downsample_indices, "b n -> b n d", d=rgb_features.shape[-1]))
         else:
@@ -427,19 +520,27 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         self, observation_space, backbone_type: str, hidden_dim: int, num_points: int,
         do_image: bool, do_pos: bool, do_rgb: bool, finetune: bool,
         xyz_proj_type: str, clip_model: str, lowdim_obs_keys: List[str],
-        do_crop: bool, boundaries: List[List[float]]
+        do_crop: bool, boundaries: List[List[float]],
+        debug_nan: bool = False
     ):
         super().__init__(observation_space, num_points, lowdim_obs_keys, do_crop, boundaries)
         
+        self.debug_nan = debug_nan
         self.do_image, self.do_pos, self.do_rgb = do_image, do_pos, do_rgb
         self.hidden_dim = hidden_dim
         self.backbone_type = backbone_type
+        self.viz_counter = 0
+        self.viz_interval = 50
+        self.max_viz_frames = 10
         
         if backbone_type in ["resnet18", "resnet50"]:
             self.backbone, self.normalize = load_resnet_features(backbone_type, pretrained=True)
             fpn_in_channels_list = [256, 512, 1024, 2048] if backbone_type == 'resnet50' else [64, 128, 256, 512]
         elif backbone_type == "clip":
+            if clip_model not in ["RN50", "RN101", "RN50x4", "RN50x16", "RN50x64"]:
+                raise NotImplementedError(f"CLIP model {clip_model} is not a supported ResNet variant.")
             self.backbone, self.normalize = load_clip_features(clip_model)
+            # These channel numbers are specific to ResNet-based CLIP models (like RN50)
             fpn_in_channels_list = [256, 512, 1024, 2048] # For RN50
         else:
             raise NotImplementedError(f"Backbone type {backbone_type} not supported")
@@ -461,8 +562,88 @@ class Adapt3REncoder(PointCloudBaseEncoder):
     @property
     def is_blind(self): return not self.do_image
 
+    def _visualize_point_cloud(self, observations: Dict[str, Tensor], pcds_world: Tensor):
+        """
+        Generates and saves a visualization of the RGB image, depth map, and 3D point cloud.
+        """
+        try:
+            # --- Get data for visualization (from the first item in the batch) ---
+            cam_name = EnvUtils.list_cameras(self.observation_space)[0]
+
+            rgb_image = observations[EnvUtils.camera_name_to_image_key(cam_name)][0].cpu().numpy()
+            depth_image = observations[EnvUtils.camera_name_to_depth_key(cam_name)][0].cpu().numpy().squeeze()
+            
+            pcd_to_viz = pcds_world[0, 0].cpu().numpy()
+            
+            # --- Create Plot ---
+            fig = plt.figure(figsize=(18, 6))
+
+            # Plot 1: RGB
+            ax1 = fig.add_subplot(1, 3, 1)
+            ax1.imshow(rgb_image)
+            ax1.set_title("RGB Image")
+            ax1.axis('off')
+
+            # Plot 2: Depth
+            ax2 = fig.add_subplot(1, 3, 2)
+            ax2.imshow(depth_image, cmap='viridis')
+            ax2.set_title("Depth Image")
+            ax2.axis('off')
+
+            # Plot 3: 3D Point Cloud
+            ax3 = fig.add_subplot(1, 3, 3, projection='3d')
+            
+            num_points_to_viz = 2048
+            if pcd_to_viz.shape[0] > num_points_to_viz:
+                sample_indices = np.random.choice(pcd_to_viz.shape[0], num_points_to_viz, replace=False)
+                pcd_sample = pcd_to_viz[sample_indices]
+            else:
+                pcd_sample = pcd_to_viz
+
+            ax3.scatter(pcd_sample[:, 0], pcd_sample[:, 1], pcd_sample[:, 2], s=0.5)
+            ax3.set_title("3D Point Cloud")
+            ax3.set_xlabel("X")
+            ax3.set_ylabel("Y")
+            ax3.set_zlabel("Z")
+            
+            try:
+                ax3.set_box_aspect([np.ptp(pcd_sample[:, i]) for i in range(3)])
+            except Exception:
+                pass
+
+            # --- Save Figure ---
+            pid = os.getpid()
+            viz_dir = "visualizations"
+            os.makedirs(viz_dir, exist_ok=True)
+            save_path = os.path.join(viz_dir, f"point_cloud_viz_pid{pid}_frame{self.viz_counter}.png")
+            plt.tight_layout()
+            plt.savefig(save_path)
+            plt.close(fig)
+            print(f"Saved point cloud visualization to {save_path}")
+
+        except Exception as e:
+            print(f"Visualization failed: {e}")
+
     def forward(self, observations: Dict[str, Tensor]) -> Tuple[Tensor, Optional[Tensor]]:
         pcds_world = self._build_point_cloud(observations) # (B, N_cam, H*W, 3)
+        
+        _check_nan(pcds_world, "pcds_world")
+        # Check if we should visualize in this step
+        if (
+            plt is not None
+            and self.viz_counter < self.max_viz_frames
+            and self.training # Typically only visualize during training
+            and (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0 or not torch.distributed.is_initialized())
+        ):
+            # Simple global step counter proxy
+            if not hasattr(self, "_global_step"):
+                self._global_step = 0
+            
+            if self._global_step % self.viz_interval == 0:
+                # self._visualize_point_cloud(observations, pcds_world)
+                self.viz_counter += 1
+            
+            self._global_step += 1
         
         rgb_tensors_uint8 = [
             observations[EnvUtils.camera_name_to_image_key(cam)] 
@@ -489,18 +670,25 @@ class Adapt3REncoder(PointCloudBaseEncoder):
 
         with torch.set_grad_enabled(self.backbone.training):
             rgb_features_dict = self.backbone(self.normalize(rgb_batch))
+            if isinstance(rgb_features_dict, dict):
+                # print("rgb_features_dict:")
+                for k, v in rgb_features_dict.items():
+                    if torch.is_tensor(v):
+                        _check_nan(v, k)
+            
             # 清理大型输入张量
             del rgb_batch
             torch.cuda.empty_cache()
         
-        # Convert CLIP features to float32 for compatibility with FPN
-        if self.backbone_type == 'clip':
-            rgb_features_dict = {k: v.float() for k, v in rgb_features_dict.items()}
+
         
         fpn_features_dict = self.feature_pyramid({f'layer{i+1}': v for i, v in enumerate(rgb_features_dict.values())})
         # 清理特征字典
         del rgb_features_dict
         torch.cuda.empty_cache()
+
+        for k, v in fpn_features_dict.items():
+            _check_nan(v, k)
         
         # Use available key if expected key doesn't exist
         if self.fpn_output_key in fpn_features_dict:
@@ -514,6 +702,7 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         del fpn_features_dict
         torch.cuda.empty_cache()
 
+        # Get the 2d rgb features: 
         feat_h, feat_w = rgb_features.shape[-2:]
         
         # Simple subsampling instead of interpolation to avoid shape issues
@@ -542,7 +731,9 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         pcd_flat, rgb_features_flat = pcd_flat * mask.unsqueeze(-1), rgb_features_flat * mask.unsqueeze(-1)
         
         pcd_down, feats_down = self._downsample_point_cloud(pcd_flat, rgb_features_flat)
-        
+        _check_nan(pcd_down, "pcd_down")
+        _check_nan(feats_down, "feats_down")
+
         pcd_pos_emb = self.xyz_proj(pcd_down)
         
         cat_cloud = []
@@ -553,6 +744,8 @@ class Adapt3REncoder(PointCloudBaseEncoder):
         perception_out = torch.max(self.pointcloud_extractor(final_cloud_features), dim=1)[0]
         
         lowdim_out = self._encode_lowdim(observations)
+        _check_nan(perception_out, "perception_out")
+        _check_nan(lowdim_out, "lowdim_out")
 
         return perception_out, lowdim_out
 
@@ -594,7 +787,7 @@ class Adapt3RNet(Net):
         perception_feats, lowdim_feats = self.visual_encoder(observations)
         
         x = [perception_feats]
-        if lowdim_feats is not None: 
+        if lowdim_feats is not None and self.visual_encoder.d_out_lowdim > 0: 
             x.append(lowdim_feats)
             
         if isinstance(self.prev_action_embedding, nn.Embedding):
@@ -609,29 +802,22 @@ class Adapt3RNet(Net):
             prev_actions = self.prev_action_embedding(masks * prev_actions.float())
         x.append(prev_actions)
         
-        # 合并特征并清理中间变量
         cat_features = torch.cat(x, dim=1)
-        del x, perception_feats
-        if lowdim_feats is not None:
-            del lowdim_feats
-        torch.cuda.empty_cache()
         
-        # 将 rnn_build_seq_info 传递给 state_encoder
+        _check_nan(cat_features, "cat_features")
         out, rnn_hidden_states = self.state_encoder(
             cat_features, rnn_hidden_states, masks, rnn_build_seq_info
         )
-        
-        # 清理最后的中间变量
-        del cat_features
-        torch.cuda.empty_cache()
 
-        # 确保所有参数都参与计算
-        dummy_loss = 0
-        for param in self.parameters():
-            if param.requires_grad:
-                dummy_loss = dummy_loss + param.mean() * 0
+        _check_nan(out, "out")
         
-        return out + dummy_loss.detach(), rnn_hidden_states, {}
+        # This dictionary passes intermediate tensors to the aux losses.
+        # Common keys are "perception_embed" and "rnn_output".
+        aux_loss_state = {
+            "rnn_output": out,                 # The final output of the RNN
+        }
+
+        return out, rnn_hidden_states, aux_loss_state
 
 # ############################################################################ #
 # 5. Habitat Policy: Adapt3RPolicy
@@ -639,31 +825,50 @@ class Adapt3RNet(Net):
 
 @baseline_registry.register_policy
 class Adapt3RPolicy(NetPolicy):
-    def __init__(self, observation_space, action_space, policy_config, **kwargs):
+    """
+    Habitat-compatible policy for the Adapt3R model.
+    """
+    def __init__(self, observation_space, action_space, policy_config, aux_loss_config=None, **kwargs):
+        print(f"observation_space: {observation_space}")
+        print(f"action_space: {action_space}")
         super().__init__(
             net=Adapt3RNet(observation_space, action_space, policy_config),
             action_space=action_space,
             policy_config=policy_config,
+            aux_loss_config=aux_loss_config,
         )
         self.net.apply(weight_init)
 
     @classmethod
     def from_config(cls, config, observation_space, action_space, **kwargs):
         # Good practice: filter out rendering sensors from obs space
-        ignore_names = [s.uuid for s in config.habitat_baselines.eval.extra_sim_sensors.values()]
-        filtered_obs = spaces.Dict(OrderedDict([(k, v) for k, v in observation_space.items() if k not in ignore_names]))
+        filtered_obs = {
+            k: v for k, v in observation_space.spaces.items() 
+            if "render_cam" not in k and "panoramic" not in k
+        }
+        filtered_obs = spaces.Dict(filtered_obs)
+        
+        policy_config = config.habitat_baselines.rl.policy
         
         # Build policy configuration from config sections
         policy_config = OmegaConf.create({
             'name': 'Adapt3RPolicy',
-            'action_distribution_type': config.habitat_baselines.rl.policy.agent_0.get('action_distribution_type', 'categorical'),
+            # changed to main_agent when pointnav
+            'action_distribution_type': config.habitat_baselines.rl.policy.main_agent.get('action_distribution_type', 'categorical'),
             'hidden_size': config.habitat_baselines.rl.ppo.hidden_size,
             'rnn_type': config.habitat_baselines.rl.ddppo.rnn_type,
             'num_recurrent_layers': config.habitat_baselines.rl.ddppo.num_recurrent_layers,
             'visual_encoder': config.habitat_baselines.rl.ddppo.adapt3r.visual_encoder
         })
+
+        aux_loss_config = config.habitat_baselines.rl.auxiliary_losses
         
-        return cls(filtered_obs, action_space, policy_config)
+        return cls(
+            observation_space=filtered_obs, 
+            action_space=action_space, 
+            policy_config=policy_config,
+            aux_loss_config=aux_loss_config
+        )
 
 
 

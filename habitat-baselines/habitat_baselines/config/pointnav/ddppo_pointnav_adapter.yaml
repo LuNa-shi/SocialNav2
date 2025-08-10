@@ -1,0 +1,96 @@
+# @package _global_
+
+defaults:
+  - /benchmark/nav/pointnav: pointnav_hm3d
+  - /habitat_baselines: habitat_baselines_rl_config_base
+  - _self_
+
+habitat_baselines:
+  verbose: False
+  trainer_name: "ddppo"
+  torch_gpu_id: 0
+  tensorboard_dir: "tb"
+  video_dir: "video_dir"
+  test_episode_count: -1
+  eval_ckpt_path_dir: "evaluation/pointnav_hm3d/checkpoints_85_adapt3r_res50"
+  num_environments: 4
+  checkpoint_folder: "evaluation/pointnav_hm3d/checkpoints_85_adapt3r_res50"
+  num_updates: -1
+  total_num_steps: 2.5e7
+  log_interval: 10
+  num_checkpoints: 10
+  # Force PyTorch to be single threaded as
+  # this improves performance considerably
+  force_torch_single_threaded: True
+  load_resume_state_config: False
+  
+
+  rl:
+    policy:
+      main_agent:
+        name: "Adapt3RPolicy"
+
+    ppo:
+      # ppo params
+      clip_param: 0.2
+      ppo_epoch: 2
+      num_mini_batch: 4
+      value_loss_coef: 0.5
+      entropy_coef: 0.01
+      lr: 2.5e-4
+      eps: 1e-5
+      max_grad_norm: 0.5
+      num_steps: 64
+      use_gae: True
+      gamma: 0.99
+      tau: 0.95
+      use_linear_clip_decay: False
+      use_linear_lr_decay: False
+      reward_window_size: 50
+
+      use_normalized_advantage: False
+
+      hidden_size: 512
+
+      # Use double buffered sampling, typically helps
+      # when environment time is similar or larger than
+      # policy inference time during rollout generation
+      use_double_buffered_sampler: False
+
+    ddppo:
+      sync_frac: 0.6
+      # The PyTorch distributed backend to use
+      distrib_backend: NCCL
+      # Visual encoder backbone
+
+      # Initialize with pretrained weights
+      pretrained: False
+      # Initialize just the visual encoder backbone with pretrained weights
+      pretrained_encoder: False
+      # Whether the visual encoder backbone will be trained.
+      train_encoder: True
+      # Whether to reset the critic linear layer
+      reset_critic: True
+
+      rnn_type: GRU
+      num_recurrent_layers: 2
+
+      adapt3r:
+        visual_encoder:
+          backbone_type: "resnet50"     # 使用 resnet18 更稳定，没有预训练模型
+          hidden_dim: 126               # 必须能被6整除 (NeRF positional encoding)
+          num_points: 256               # 点云采样数量
+          do_image: True                
+          do_pos: True                 
+          do_rgb: False                 
+          finetune: True                # 训练视觉编码器 (没有预训练模型)
+          xyz_proj_type: "nerf"         # NeRF 位置编码
+          clip_model: "RN50"            # CLIP模型 (如果使用CLIP backbone)
+          
+          # 点云处理配置
+          do_crop: True                 # 启用点云裁剪
+          boundaries: [[-5.0, -5.0, 0.0], [5.0, 5.0, 3.0]]  # 裁剪边界 
+          
+          # 低维观测键 (导航相关传感器)
+          lowdim_obs_keys: 
+            - "pointgoal_with_gps_compass"
