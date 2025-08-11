@@ -198,6 +198,8 @@ class SingleAgentAccessMgr(AgentAccessMgr):
             orig_action_space=self._env_spec.orig_action_space,
             agent_name=self.agent_name,
         )
+
+
         if (
             self._config.habitat_baselines.rl.ddppo.pretrained_encoder
             or self._config.habitat_baselines.rl.ddppo.pretrained
@@ -220,6 +222,8 @@ class SingleAgentAccessMgr(AgentAccessMgr):
             state_to_load = {}
             if 0 in pretrained_state:
                 state_to_load = pretrained_state[0]["state_dict"]
+            elif '0' in pretrained_state:
+                state_to_load = pretrained_state['0']["state_dict"]
             elif "state_dict" in pretrained_state:
                 state_to_load = pretrained_state["state_dict"]
             else:

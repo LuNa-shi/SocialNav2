@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
 from habitat_baselines.rl.ddppo.policy import PointNavResNetNet
 from habitat_baselines.rl.ddppo.policy.adapt3r_policy import Adapt3RPolicy  # Import Adapt3R Policy
+from habitat_baselines.rl.ddppo.policy.rgbd_resnet_policy import RGBDResNetNet, RGBDResNetPolicy
 from habitat_baselines.rl.ppo.agent_access_mgr import AgentAccessMgr
 from habitat_baselines.rl.ppo.evaluator import Evaluator
 from habitat_baselines.rl.ppo.single_agent_access_mgr import (  # noqa: F401.

@@ -23,7 +23,15 @@ from .habitat_camera_sensors import (  # noqa: F401.
     CameraExtrinsicsSensor,
 )
 
+from .rgbd_resnet_policy import (  # noqa: F401.
+    RGBDResNetNet,
+    RGBDResNetPolicy,
+)
+
 from . import habitat_camera_sensors
+
+# Ensure RGBD policy is imported so it registers with the baseline registry
+from .rgbd_resnet_policy import RGBDResNetPolicy  # noqa: F401
 
 # print('--------------------------------')
 # print("CameraIntrinsicsSensor", CameraIntrinsicsSensor)

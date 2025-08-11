@@ -376,6 +376,8 @@ class DDPPOConfig(HabitatBaselinesBaseConfig):
     rnn_type: str = "GRU"
     num_recurrent_layers: int = 1
     backbone: str = "resnet18"
+    # RGB backbone for RGBD policy
+    rgb_backbone: str = "resnet18"
     # Visual encoder backbone
     pretrained_weights: str = "data/ddppo-models/gibson-2plus-resnet50.pth"
     # Initialize with pretrained weights
