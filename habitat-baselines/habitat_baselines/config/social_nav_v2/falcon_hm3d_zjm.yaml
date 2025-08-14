@@ -26,10 +26,16 @@ defaults:
 habitat:
   environment:
     iterator_options:
-      shuffle: False # keep the same order
+      shuffle: True   
+      num_episode_sample: 16000
+      group_by_scene: False
+  # simulator:
+  #   habitat_sim_v0:
+  #     gpu_device_id: -1  # 强制使用CPU渲染
+  #     gpu_gpu: false     # 禁用GPU
   gym:
     obs_keys: 
-      # - agent_0_articulated_agent_jaw_rgb # use it if add RGB camera
+      - agent_0_articulated_agent_jaw_rgb # 启用RGB用于数据收集
       - agent_0_articulated_agent_jaw_depth
       - agent_0_pointgoal_with_gps_compass
   task:
@@ -92,7 +98,7 @@ habitat_baselines:
   torch_gpu_id: 0
   tensorboard_dir: "evaluation/falcon/hm3d/tb"
   video_dir: "evaluation/falcon/hm3d/video"
-  test_episode_count: -1
+  test_episode_count: 16000
   eval_ckpt_path_dir: "pretrained_model/falcon_noaux_25.pth"
   num_environments: 8
   checkpoint_folder: "evaluation/falcon/hm3d/checkpoints"
@@ -106,7 +112,7 @@ habitat_baselines:
   load_resume_state_config: False
 
   evaluator:
-    _target_: habitat_baselines.rl.ppo.falcon_evaluator.FALCONEvaluator
+    _target_: habitat_baselines.rl.ppo.falcon_evaluator_zjm.FALCONEvaluator
 
   eval:
     use_ckpt_config: False 
@@ -171,3 +177,64 @@ habitat_baselines:
       backbone: resnet50
       rnn_type: LSTM
       num_recurrent_layers: 2
+
+# =======================================================================================
+# 专家数据收集配置 (Expert Data Collection Configuration)
+# =======================================================================================
+data_collection:
+  # 主开关：是否启用数据收集功能
+  enabled: true
+  
+  # 每个场景收集的episode数量 (建议2-3个以确保高效切换)
+  episodes_per_scene: 2
+  
+  # 数据质量过滤阈值
+  filtering:
+    # 最低奖励阈值 (基于现有数据集分析: 成功episodes中位数=5.37, 75%分位数=7.16)
+    # 5.0: 保留约50%的成功episodes (平衡质量和数量，推荐用于IL训练)
+    # 7.0: 保留约25%的成功episodes (极高质量，适合少量高质量数据训练)
+    reward_threshold: 2.0
+    
+    # 最小序列长度阈值 (确保轨迹有足够长度)
+    length_threshold: 40
+    
+    # 最大序列长度阈值 (避免过长的episode)
+    max_length_threshold: 300
+    
+    # 成功率阈值 (必须是成功完成的任务)
+    success_required: true
+    
+    # 动作完整性检查
+    action_completeness:
+      # 是否要求包含所有基础动作类型
+      require_all_actions: false
+      # 必须包含的动作列表 (0:STOP, 1:FORWARD, 2:TURN_LEFT, 3:TURN_RIGHT)
+      required_actions: [1, 2, 3]
+      # 是否要求以STOP动作结束
+      require_stop_ending: False
+  
+  # 数据存储配置
+  storage:
+    # 数据存储根目录 (使用高速内存文件系统)
+    output_root: "/data/il_dataset"
+    
+    # 恢复模式配置
+    resume:
+      # 是否启用恢复模式（从现有文件夹继续收集）
+      enabled: true
+      # 要恢复的数据文件夹路径（如果为空，则创建新文件夹）
+      resume_folder: "/data/il_dataset/expert_data_20250813_064841"
+  
+  # 效率优化配置
+  efficiency:
+    # 是否在收集到目标数量后立即终止当前场景
+    early_scene_termination: true
+    # 进度报告间隔 (每N个episode报告一次)
+    progress_report_interval: 10
+  
+  # 调试和监控配置
+  debug:
+    # 是否启用详细日志
+    verbose_logging: true
+    # 是否在每个episode结束后打印统计信息
+    print_episode_stats: true

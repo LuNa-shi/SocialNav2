@@ -68,7 +68,7 @@ NUM_ACTIONS = 4  # [0: STOP, 1: MOVE_FORWARD, 2: TURN_LEFT, 3: TURN_RIGHT]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Output paths
-MODEL_SAVE_PATH = "il_model_final.pth"
+MODEL_SAVE_PATH = "il_model_0811.pth"
 CHECKPOINT_DIR = "outputs"
 SAVE_BEST = True                  # Save best checkpoint instead of only last
 SAVE_BEST_BY = "train_accuracy"       # train_loss or train_accuracy
@@ -487,19 +487,28 @@ class SocialNav2Dataset(Dataset):
         # Actions: Use raw actions [0,1,2,3] directly for CrossEntropyLoss
         raw_actions = other_data['actions'][start_idx:end_idx].squeeze(-1)
         
-        # If actions in new dataset are [1,2,3], shift to [0,1,2]
-        if raw_actions.min() >= 1 and raw_actions.max() <= 3:
-            raw_actions = raw_actions - 1
+        # Keep original action encoding - do not force conversion
+        # The dataset contains mixed encodings: [0,1,2,3] and [1,2,3]
+        # Let the model learn the actual action space as-is
         
-        # Debug: Check action value range
+        # Debug: Check action value range and detect encoding type
         unique_actions = np.unique(raw_actions)
         if len(unique_actions) > 0:
             min_action, max_action = unique_actions.min(), unique_actions.max()
+            
+            # Detect encoding type
+            encoding_type = "A(0-3)" if min_action == 0 else "B(1-3)"
+            
+            # Only warn for truly invalid actions (outside 0-3 range)
             if min_action < 0 or max_action > 3:
-                print(f"Warning: Unexpected action values in range [{min_action}, {max_action}]")
+                print(f"Warning: Invalid action values in range [{min_action}, {max_action}]")
                 print(f"Unique actions: {unique_actions}")
                 # Clamp actions to valid range [0,1,2,3]
                 raw_actions = np.clip(raw_actions, 0, 3)
+            else:
+                # Log encoding type for monitoring (reduce frequency to avoid spam)
+                if np.random.random() < 0.01:  # Log 1% of episodes
+                    print(f"Episode encoding {encoding_type}: actions {unique_actions}")
         
         actions_seq = torch.from_numpy(raw_actions).long()  # Use actions directly: [0,1,2,3]
         
@@ -573,7 +582,7 @@ def create_dataloader(dataset_root: str, batch_size: int = BATCH_SIZE) -> DataLo
             dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=2,
+            num_workers=8,
             pin_memory=True,
             drop_last=True,
             sampler=sampler,
@@ -583,7 +592,7 @@ def create_dataloader(dataset_root: str, batch_size: int = BATCH_SIZE) -> DataLo
             dataset,
             batch_size=batch_size,
             shuffle=True,
-            num_workers=2,  # Adjust based on your system
+            num_workers=8,  # Adjust based on your system
             pin_memory=True if torch.cuda.is_available() else False,
             drop_last=True  # Ensure consistent batch sizes
         )
@@ -716,35 +725,42 @@ def train():
             masks = batch_data['masks'].to(DEVICE)
             batch_size, seq_len = actions.shape
             
-            rnn_hidden_states = model.module.get_initial_hidden_state(batch_size) if is_ddp else model.get_initial_hidden_state(batch_size)
-            prev_actions = torch.zeros(batch_size, dtype=torch.long, device=DEVICE)
             total_loss = 0.0
             correct_predictions = 0
             total_predictions = 0
             
-            for t in range(seq_len):
-                current_obs = {k: v[:, t] for k, v in observations.items()}
-                current_actions = actions[:, t]
-                # Use boolean (B,1) masks to satisfy prev_action embedding (torch.where expects bool)
-                # and also keep single-step RNN path
-                current_masks = masks[:, t].bool()
+            # Process each sequence in the batch independently to avoid RNN state contamination
+            for b in range(batch_size):
+                # Initialize RNN state for this specific sequence
+                rnn_hidden_states = model.module.get_initial_hidden_state(1) if is_ddp else model.get_initial_hidden_state(1)
+                prev_action = torch.zeros(1, dtype=torch.long, device=DEVICE)
                 
-                with torch.cuda.amp.autocast(enabled=DDP_FP16):
-                    action_logits, rnn_hidden_states = (model.module if is_ddp else model)(
-                        observations=current_obs,
-                        rnn_hidden_states=rnn_hidden_states,
-                        prev_actions=prev_actions,
-                        masks=current_masks,
-                    )
-                    step_loss = criterion(action_logits, current_actions)
+                # Extract single sequence data
+                seq_obs = {k: v[b:b+1] for k, v in observations.items()}  # (1, seq_len, ...)
+                seq_actions = actions[b:b+1]  # (1, seq_len)
+                seq_masks = masks[b:b+1]  # (1, seq_len)
                 
-                total_loss += step_loss
-                predicted_actions = torch.argmax(action_logits, dim=1)
-                correct_predictions += (predicted_actions == current_actions).sum().item()
-                total_predictions += batch_size
-                prev_actions = current_actions
+                for t in range(seq_len):
+                    current_obs = {k: v[:, t] for k, v in seq_obs.items()}  # (1, ...)
+                    current_action = seq_actions[:, t]  # (1,)
+                    current_mask = seq_masks[:, t].bool()  # (1,)
+                    
+                    with torch.cuda.amp.autocast(enabled=DDP_FP16):
+                        action_logits, rnn_hidden_states = (model.module if is_ddp else model)(
+                            observations=current_obs,
+                            rnn_hidden_states=rnn_hidden_states,
+                            prev_actions=prev_action,
+                            masks=current_mask,
+                        )
+                        step_loss = criterion(action_logits, current_action)
+                    
+                    total_loss += step_loss
+                    predicted_action = torch.argmax(action_logits, dim=1)
+                    correct_predictions += (predicted_action == current_action).sum().item()
+                    total_predictions += 1
+                    prev_action = current_action
             
-            avg_loss = total_loss / seq_len
+            avg_loss = total_loss / (batch_size * seq_len)
             optimizer.zero_grad()
             scaler.scale(avg_loss).backward() if DDP_FP16 else avg_loss.backward()
             
