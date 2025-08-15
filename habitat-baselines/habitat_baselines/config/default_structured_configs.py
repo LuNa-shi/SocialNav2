@@ -292,6 +292,7 @@ class PPOConfig(HabitatBaselinesBaseConfig):
     value_loss_coef: float = 0.5
     entropy_coef: float = 0.01
     lr: float = 2.5e-4
+    backbone_lr_scale: float = 1.0
     eps: float = 1e-5
     max_grad_norm: float = 0.5
     num_steps: int = 5
@@ -379,6 +380,7 @@ class DDPPOConfig(HabitatBaselinesBaseConfig):
     # RGB backbone for RGBD policy
     rgb_backbone: str = "resnet18"
     # Visual encoder backbone
+    freeze_depth_backbone: bool = False
     pretrained_weights: str = "data/ddppo-models/gibson-2plus-resnet50.pth"
     # Initialize with pretrained weights
     pretrained: bool = False

@@ -38,6 +38,7 @@ class PPO(nn.Module, Updater):
 
     @classmethod
     def from_config(cls, actor_critic: NetPolicy, config, aux_tasks = [], aux_names = [], aux_cfg = None):
+        backbone_lr_scale = getattr(config, 'backbone_lr_scale', 0.1)
         return cls(
             actor_critic=actor_critic,
             clip_param=config.clip_param,
@@ -56,6 +57,7 @@ class PPO(nn.Module, Updater):
             aux_tasks=aux_tasks,
             aux_names=aux_names,
             aux_cfg=aux_cfg,
+            backbone_lr_scale=backbone_lr_scale,
         )
 
     def __init__(
@@ -77,6 +79,7 @@ class PPO(nn.Module, Updater):
         aux_tasks=[],
         aux_names=[],
         aux_cfg=None,
+        backbone_lr_scale: float = 0.1,
     ) -> None:
         super().__init__()
 
@@ -91,6 +94,7 @@ class PPO(nn.Module, Updater):
         self.aux_loss_coef = aux_loss_coef   ## added
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        self.backbone_lr_scale = backbone_lr_scale
 
         self.device = next(actor_critic.parameters()).device
 
@@ -127,24 +131,66 @@ class PPO(nn.Module, Updater):
         ]
 
     def _create_optimizer(self, lr, eps, aux_tasks=None):
-        params = list(filter(lambda p: p.requires_grad, self.parameters()))
-        logger.info(
-            f"(No Aux) Main Number of params to train: {sum(param.numel() for param in params)}"
-        )
-
+        # 分离骨干网络参数和其他参数
+        backbone_params = []
+        other_params = []
+        
+        # 遍历actor_critic的参数
+        for name, param in self.actor_critic.named_parameters():
+            if param.requires_grad:
+                # 检查是否是RGB或深度骨干网络参数
+                # 对于RGBD ResNet Policy，参数名称包含：
+                # - 'rgb_backbone' 用于RGB骨干网络
+                # - 'backbone' 用于深度骨干网络
+                # - 'visual_encoder.rgb_backbone' 和 'visual_encoder.backbone' 用于编码器中的骨干网络
+                if any(keyword in name for keyword in ['rgb_backbone', 'backbone']) and not any(exclude in name for exclude in ['compression', 'fc', 'embedding', 'state_encoder']):
+                    backbone_params.append(param)
+                else:
+                    other_params.append(param)
+        
+        # 添加非actor_critic参数
+        for name, param in self.named_parameters():
+            if not name.startswith("actor_critic.") and param.requires_grad:
+                other_params.append(param)
+        
+        # 添加辅助任务参数
         if len(aux_tasks) > 0:
             for aux_t in aux_tasks:
-                params += list(filter(lambda p: p.requires_grad, aux_t.parameters()))
-
+                for param in aux_t.parameters():
+                    if param.requires_grad:
+                        other_params.append(param)
+        
+        # 创建参数组
+        param_groups = []
+        
+        # 其他参数使用标准学习率
+        if other_params:
+            param_groups.append({
+                'params': other_params,
+                'lr': lr,
+                'eps': eps,
+            })
+        
+        # 骨干网络参数使用较低学习率
+        if backbone_params:
+            param_groups.append({
+                'params': backbone_params,
+                'lr': lr * self.backbone_lr_scale,
+                'eps': eps,
+            })
+        
         logger.info(
-            f"Total Number of params to train: {sum(param.numel() for param in params)}"
+            f"Backbone params: {sum(param.numel() for param in backbone_params)}, "
+            f"Other params: {sum(param.numel() for param in other_params)}"
         )
-        if len(params) > 0:
+        logger.info(
+            f"Total Number of params to train: {sum(param.numel() for param in backbone_params + other_params)}"
+        )
+        
+        if len(param_groups) > 0:
             optim_cls = optim.Adam
             optim_kwargs = dict(
-                params=params,
-                lr=lr,
-                eps=eps,
+                params=param_groups,
             )
             signature = inspect.signature(optim_cls.__init__)
             if "foreach" in signature.parameters:

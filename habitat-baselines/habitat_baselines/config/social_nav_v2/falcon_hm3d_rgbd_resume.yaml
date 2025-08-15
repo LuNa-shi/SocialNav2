@@ -99,7 +99,7 @@ habitat_baselines:
   video_dir: "evaluation/falcon/hm3d/video_rgbd"
   test_episode_count: -1
   num_environments: 6  # Reduced due to higher memory usage of RGBD policy
-  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_rgbd_814_fwarmup" # save_dir for training
+  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_rgbd_813_resume" # save_dir for training
   num_updates: -1
   total_num_steps: 8000000 # exact steps 12560368
   log_interval: 10
@@ -178,14 +178,16 @@ habitat_baselines:
       # The PyTorch distributed backend to use
       distrib_backend: NCCL
       
-      pretrained_weights: pretrained_model/falcon_pretrained_25.pth
+      # ! fix freeze backbone to be False
+      # ! change this line to be ckpt...
+      pretrained_weights: evaluation/falcon/hm3d/checkpoints_rgbd_812_warmup/ckpt.2.pth
       # RGBD: Load depth backbone from pretrained weights
       pretrained: True
       pretrained_encoder: False  
       train_encoder: True
+      freeze_depth_backbone: False
       # Whether to reset the critic linear layer
       reset_critic: True
-      freeze_depth_backbone: True
 
       # Model parameters for RGBD policy
       backbone: resnet50         # Depth backbone (loads from checkpoint)

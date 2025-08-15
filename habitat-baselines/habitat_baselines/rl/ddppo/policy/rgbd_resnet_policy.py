@@ -186,8 +186,8 @@ class RGBDResNetPolicy(NetPolicy):
         rgb_backbone = getattr(config.habitat_baselines.rl.ddppo, 'rgb_backbone', 
                               config.habitat_baselines.rl.ddppo.backbone)
 
-        # freeze_depth_backbone = getattr(config.habitat_baselines.rl.ddppo, 'freeze_depth_backbone', False)
-        freeze_depth_backbone = False
+        freeze_depth_backbone = getattr(config.habitat_baselines.rl.ddppo, 'freeze_depth_backbone', False)
+        # freeze_depth_backbone = True
 
         return cls(
             observation_space=filtered_obs,
