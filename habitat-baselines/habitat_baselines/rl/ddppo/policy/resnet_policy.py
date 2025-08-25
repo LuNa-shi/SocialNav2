@@ -646,7 +646,6 @@ class PointNavResNetNet(Net):
             visual_feats = self.visual_fc(visual_feats)
             aux_loss_state["perception_embed"] = visual_feats
             x.append(visual_feats)
-
         if len(self._fuse_keys_1d) != 0:
             fuse_states = torch.cat(
                 [observations[k] for k in self._fuse_keys_1d], dim=-1

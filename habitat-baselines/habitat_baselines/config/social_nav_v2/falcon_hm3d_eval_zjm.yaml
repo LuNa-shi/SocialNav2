@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - /benchmark/nav/socialnav_v2: falcon_hm3d_task
+  - /benchmark/nav/socialnav_v2: falcon_hm3d_task_for_train
   - /habitat_baselines: habitat_baselines_rl_config_base
   - /habitat/simulator/sim_sensors@habitat_baselines.eval.extra_sim_sensors.third_rgb_sensor: third_rgb_sensor 
   - /habitat_baselines/rl/policy@habitat_baselines.rl.policy.agent_1: single_fixed
@@ -24,22 +24,16 @@ defaults:
   - _self_
 
 habitat:
-  seed: 20250824
-  environment:
-    iterator_options:
-      shuffle: True   
-      num_episode_sample: 80000
-      group_by_scene: True
-    
-  # simulator:
-  #   habitat_sim_v0:
-  #     gpu_device_id: -1  # 强制使用CPU渲染
-  #     gpu_gpu: false     # 禁用GPU
+  dataset:
+    split: val
   gym:
     obs_keys: 
-      - agent_0_articulated_agent_jaw_rgb # 启用RGB用于数据收集
+      # - agent_0_articulated_agent_jaw_rgb # use it if add RGB camera
       - agent_0_articulated_agent_jaw_depth
       - agent_0_pointgoal_with_gps_compass
+      - agent_0_localization_sensor
+      - agent_0_human_num_sensor  
+      - agent_0_oracle_humanoid_future_trajectory
   task:
     actions:
       agent_0_discrete_stop:
@@ -95,33 +89,31 @@ habitat:
         allow_dyn_slide: True
 habitat_baselines:
   evaluate: True
-  verbose: True 
+  verbose: True
   trainer_name: "ddppo"
   torch_gpu_id: 0
-  tensorboard_dir: "evaluation/falcon/hm3d/tb"
-  video_dir: "evaluation/falcon/hm3d/video"
-  test_episode_count: 16000
-  eval_ckpt_path_dir: "pretrained_model/falcon_noaux_25.pth"
+  tensorboard_dir: "evaluation/falcon/hm3d_0823/tb"
+  video_dir: "/root/zjm/SocialNav2/evaluation/falcon/hm3d_0823/video"
+  test_episode_count: -1
   num_environments: 8
-  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints"
+  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_823" # save_dir for training
+  eval_ckpt_path_dir: "root/zjm/SocialNav2/checkpoints0823/best_model_weights_rl.pth"
   num_updates: -1
-  total_num_steps: 1e8
+  total_num_steps: 12560368 # exact steps
   log_interval: 10
-  num_checkpoints: 200
+  num_checkpoints: 20 # interrupt recovery
   # Force PyTorch to be single threaded as
   # this improves performance considerably
   force_torch_single_threaded: True
   load_resume_state_config: False
 
   evaluator:
-    _target_: habitat_baselines.rl.ppo.falcon_evaluator_zjm.FALCONEvaluator
+    _target_: habitat_baselines.rl.ppo.falcon_evaluator.FALCONEvaluator
 
   eval:
     use_ckpt_config: False 
-    should_load_ckpt: True
-    split: train
+    should_load_ckpt: False
     # video_option: ["disk"]
-
   rl:
     agent:
       type: "MultiAgentAccessMgr"
@@ -133,6 +125,11 @@ habitat_baselines:
     policy:
       agent_0:
         name: "PointNavResNetPolicy"
+    # policy:
+    # # RGBD ResNet policy for the main agent
+    #   agent_0:
+    #     name: "RGBDResNetPolicy"  # Changed from PointNavResNetPolicy
+    #     action_distribution_type: "categorical"
     ppo:
       # ppo params
       clip_param: 0.2
@@ -165,7 +162,8 @@ habitat_baselines:
       # The PyTorch distributed backend to use
       distrib_backend: NCCL
       # Visual encoder backbone
-      pretrained_weights: pretrained_model/falcon_noaux_25.pth
+      pretrained_weights: /root/zjm/SocialNav2/checkpoints0823/best_model_weights_rl.pth
+      # pretrained_weights: /root/zjm/SocialNav2/checkpoints/il_as_rl_ma_ckpt.pth
       # Initialize with pretrained weights
       pretrained: True # For finetune
       # Initialize just the visual encoder backbone with pretrained weights
@@ -173,70 +171,22 @@ habitat_baselines:
       # Whether the visual encoder backbone will be trained.
       train_encoder: True
       # Whether to reset the critic linear layer
-      reset_critic: True
+      reset_critic: True # True
 
       # Model parameters
       backbone: resnet50
       rnn_type: LSTM
       num_recurrent_layers: 2
-
-# =======================================================================================
-# 专家数据收集配置 (Expert Data Collection Configuration)
-# =======================================================================================
-data_collection:
-  # 主开关：是否启用数据收集功能
-  enabled: true
-  
-  # 每个场景收集的episode数量 (建议2-3个以确保高效切换)
-  episodes_per_scene: 4
-  
-  # 数据质量过滤阈值
-  filtering:
-    # 最低奖励阈值 (基于现有数据集分析: 成功episodes中位数=5.37, 75%分位数=7.16)
-    # 5.0: 保留约50%的成功episodes (平衡质量和数量，推荐用于IL训练)
-    # 7.0: 保留约25%的成功episodes (极高质量，适合少量高质量数据训练)
-    reward_threshold: 7.0
-    
-    # 最小序列长度阈值 (确保轨迹有足够长度)
-    length_threshold: 40
-    
-    # 最大序列长度阈值 (避免过长的episode)
-    max_length_threshold: 300
-    
-    # 成功率阈值 (必须是成功完成的任务)
-    success_required: true
-    
-    # 动作完整性检查
-    action_completeness:
-      # 是否要求包含所有基础动作类型
-      require_all_actions: false
-      # 必须包含的动作列表 (0:STOP, 1:FORWARD, 2:TURN_LEFT, 3:TURN_RIGHT)
-      required_actions: [1, 2, 3]
-      # 是否要求以STOP动作结束
-      require_stop_ending: False
-  
-  # 数据存储配置
-  storage:
-    # 数据存储根目录 (使用高速内存文件系统)
-    output_root: "/data/il_dataset"
-    
-    # 恢复模式配置
-    resume:
-      # 是否启用恢复模式（从现有文件夹继续收集）
-      enabled: true
-      # 要恢复的数据文件夹路径（如果为空，则创建新文件夹）
-      resume_folder: "/data/il_dataset/expert_data_20250813_064841"
-  
-  # 效率优化配置
-  efficiency:
-    # 是否在收集到目标数量后立即终止当前场景
-    early_scene_termination: true
-    # 进度报告间隔 (每N个episode报告一次)
-    progress_report_interval: 10
-  
-  # 调试和监控配置
-  debug:
-    # 是否启用详细日志
-    verbose_logging: true
-    # 是否在每个episode结束后打印统计信息
-    print_episode_stats: true
+      
+    auxiliary_losses: 
+      people_counting:
+        max_human_num: 6
+        loss_scale: 0.1   
+      guess_human_position:
+        max_human_num: 6
+        position_dim: 2
+        loss_scale: 0.1   
+      future_trajectory_prediction:
+        max_human_num: 6
+        future_step: 4
+        loss_scale: 0.1       

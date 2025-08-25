@@ -358,9 +358,13 @@ class RNNStateEncoder(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         hidden_states = hidden_states.permute(1, 0, 2)
         if x.size(0) == hidden_states.size(1):
+            # print("single_forward")
+            # print(f"x.size(0): {x.size(0)}, hidden_states.size(1): {hidden_states.size(1)}")
             assert rnn_build_seq_info is None
             x, hidden_states = self.single_forward(x, hidden_states, masks)
         else:
+            # print("seq_forward")
+            # print(f"x.size(0): {x.size(0)}, hidden_states.size(1): {hidden_states.size(1)}")
             assert rnn_build_seq_info is not None
             x, hidden_states = self.seq_forward(
                 x, hidden_states, masks, rnn_build_seq_info

@@ -157,7 +157,7 @@ habitat_baselines:
       # The PyTorch distributed backend to use
       distrib_backend: NCCL
       # Visual encoder backbone
-      pretrained_weights: pretrained_model/falcon_noaux_25.pth
+      pretrained_weights: /root/zjm/SocialNav2/checkpoints/best_model.pth
       # Initialize with pretrained weights
       pretrained: True # For finetune
       # Initialize just the visual encoder backbone with pretrained weights
