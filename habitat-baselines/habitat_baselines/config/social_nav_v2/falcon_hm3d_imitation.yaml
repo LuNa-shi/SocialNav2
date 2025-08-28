@@ -93,23 +93,23 @@ habitat:
         allow_dyn_slide: True
 habitat_baselines:
   evaluate: False # True
-  verbose: False 
+  verbose: True 
   trainer_name: "falcon_trainer" ## original ppo works for self._agent, but we need to train self._agent._agents[0]
   torch_gpu_id: 0
-  tensorboard_dir: "evaluation/falcon/hm3d/tb"
+  tensorboard_dir: "evaluation/falcon/hm3d/tb_825"
   video_dir: "evaluation/falcon/hm3d/video"
   test_episode_count: -1
   num_environments: 8
-  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_87" # save_dir for training
+  checkpoint_folder: "evaluation/falcon/hm3d/checkpoints_825" # save_dir for training
   num_updates: -1
   total_num_steps: 15000000 # exact steps 12560368
   log_interval: 10
-  num_checkpoints: 20 # interrupt recovery
+  num_checkpoints: 50 # interrupt recovery
   # Force PyTorch to be single threaded as
   # this improves performance considerably
   force_torch_single_threaded: True
-  load_resume_state_config: False
-  # train_ckpt: "evaluation/falcon/hm3d/checkpoints/latest.pth" # "evaluation/falcon/hm3d/checkpoints/ckpt.000020.pth"
+  load_resume_state_config: True
+  # train_ckpt: "/root/swx/track2/Falcon/evaluation/falcon/hm3d/checkpoints_825/ckpt.15.pth" # "evaluation/falcon/hm3d/checkpoints/ckpt.000020.pth"
 
   evaluator:
     _target_: habitat_baselines.rl.ppo.falcon_evaluator.FALCONEvaluator
@@ -178,7 +178,7 @@ habitat_baselines:
       # The PyTorch distributed backend to use
       distrib_backend: NCCL
       
-      pretrained_weights: /root/zjm/SocialNav2/outputs/il_model_best.pth
+      pretrained_weights: /root/zjm/SocialNav2/checkpoints0824/best_model_weights_rl.pth
       # Adapt3R: No pretrained weights available
       pretrained: True
       pretrained_encoder: False  
