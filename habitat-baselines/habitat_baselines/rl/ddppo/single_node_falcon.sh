@@ -4,7 +4,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 export PYTHONPATH=$(pwd)/../../..:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export GLOG_minloglevel=2
 export MAGNUM_LOG=quiet
 export HYDRA_FULL_ERROR=1 
@@ -12,9 +12,9 @@ export OMP_NUM_THREADS=16
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 # 设置每个GPU使用16个CPU核心
 CPU_CORES_PER_GPU=16
-TOTAL_GPU=7
+TOTAL_GPU=8
 
-# 将总的CPU核心数计算出来
+# 将总的CPU核心数计算出来 
 TOTAL_CPU_CORES=$((CPU_CORES_PER_GPU * TOTAL_GPU))
 
 set -x
@@ -23,5 +23,5 @@ OMP_NUM_THREADS=$CPU_CORES_PER_GPU \
     --use_env \
     --nproc_per_node $TOTAL_GPU \
     habitat-baselines/habitat_baselines/run.py \
-    --config-name=social_nav_v2/falcon_hm3d_rgbd_train.yaml \
+    --config-name=social_nav_v2/falcon_hm3d_imitation.yaml \
     > evaluation/falcon/hm3d/train.log 2>&1
